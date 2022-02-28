@@ -1,0 +1,43 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "This device is already configured"
+        },
+        "error": {
+            "cannot_connect": "Failed to connect with the device",
+            "invalid_auth": "Invalid username or password",
+            "unknown": "Unexpected error"
+        },
+        "flow_title": "{name} Setup",
+        "step": {
+            "connect": {
+                "title": "Connect",
+                "data": {
+                    "host": "Host",
+                    "port": "Port",
+                    "use_https": "Enable HTTPS"
+                }
+            },
+            "login": {
+                "title": "Login",
+                "data": {
+                  "username": "Username",
+                  "password": "Password"
+                }
+            },
+                "channels": {
+                "title": "Choose Channels",
+                "data": {
+                    "prefix_channel": "Prefix channels with [{name}{pfx_char}]",
+                    "channels": "Channels"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+        }
+    },
+    "device_automation": {
+    }
+}
