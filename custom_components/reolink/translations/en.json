@@ -1,4 +1,5 @@
 {
+    "title": "Reolink Device",
     "config": {
         "abort": {
             "already_configured": "This device is already configured"
@@ -6,9 +7,10 @@
         "error": {
             "cannot_connect": "Failed to connect with the device",
             "invalid_auth": "Invalid username or password",
-            "unknown": "Unexpected error"
+            "unknown": "Unexpected error",
+            "channel_required": "Channel selection is required"
         },
-        "flow_title": "{name} Setup",
+        "flow_title": "{name} ({type})",
         "step": {
             "connect": {
                 "title": "Connect",
@@ -27,8 +29,9 @@
             },
                 "channels": {
                 "title": "Choose Channels",
+                "description": "Please choose one or more channels from the device.",
                 "data": {
-                    "prefix_channel": "Prefix channels with [{name}{pfx_char}]",
+                    "prefix_channel": "Prefix channels with device name",
                     "channels": "Channels"
                 }
             }
@@ -36,7 +39,20 @@
     },
     "options": {
         "step": {
-        }
+            "init": {
+              "description": "General Device Options",
+              "data": {
+                "host": "Host",
+                "port": "Port",
+                "use_https": "Enable HTTPS",
+                "username": "Username",
+                "password": "Password",
+                "use_rtsp": "Prefer RTSP",
+                "prefix_channel": "Prefix channels with device name",
+                "channels": "Channels"
+          }
+            }
+          }
     },
     "device_automation": {
     }

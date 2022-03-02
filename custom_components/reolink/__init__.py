@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
-from typing import Literal, TypedDict
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -16,6 +15,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
@@ -79,6 +79,12 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     )
 
     hass.data.setdefault(DOMAIN, {})
+
+    if not await entry_data.client.login(
+        config_entry.data.get(CONF_USERNAME),
+        config_entry.data.get(CONF_PASSWORD),
+    ):
+        raise ConfigEntryAuthFailed()
 
     device: dr.DeviceEntry = None
 
@@ -174,7 +180,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     hass.config_entries.async_setup_platforms(config_entry, PLATFORMS)
 
     if not config_entry.update_listeners:
-        config_entry.add_update_listener(async_update_options)
+        config_entry.async_on_unload(
+            config_entry.add_update_listener(async_update_options)
+        )
 
     return True
 

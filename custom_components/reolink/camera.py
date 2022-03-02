@@ -1,7 +1,8 @@
 """ Camera Platform """
+from __future__ import annotations
 
 import logging
-from typing import Optional
+from time import time
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -20,7 +21,9 @@ from . import ReolinkEntityData
 from .const import (
     CONF_CHANNELS,
     CONF_PREFIX_CHANNEL,
+    CONF_USE_RTSP,
     DATA_ENTRY,
+    DEFAULT_USE_RTSP,
     DOMAIN,
     CAMERA_TYPES,
 )
@@ -76,7 +79,7 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
         channel_id: int,
         stream_type: StreamTypes,
         config_entry: ConfigEntry,
-    ):
+    ) -> None:
         super().__init__(hass, channel_id, config_entry, CAMERA_TYPES[stream_type])
         Camera.__init__(
             self
@@ -88,6 +91,10 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
         self._prefix_channel: bool = config_entry.data.get(CONF_PREFIX_CHANNEL)
         self._attr_model = self._channel_status.type_info
         self._attr_unique_id = f"{self._attr_brand}.{self._data.device_info.serial}.{CAMERA_DOMAIN}.{self._channel_id}.{self._stream_type.name}"
+        self._use_rtsp = config_entry.data.get(CONF_USE_RTSP, DEFAULT_USE_RTSP)
+        self._attr_supported_features |= SUPPORT_STREAM
+        self._snap_spam_buffer: bytes | None = None
+        self._snap_spam_timeout: float = 0
         self._additional_updates()
 
     def _additional_updates(self):
@@ -98,58 +105,36 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
     def _handle_coordinator_update(self):
         if self._connection_id != self._data.connection_id:
             self._connection_id = self._data.connection_id
-            if self._data.abilities.rtsp and self._data.ports.rtsp.enabled:
-                schema = "rtsp"
-                port = (
-                    self._data.ports.rtsp.port
-                    if self._data.ports.rtsp.port != 554
-                    else None
-                )
-                template = (
-                    f"Preview_{self._channel_id}_{self._stream_type.name.lower()}"
-                )
-            elif self._data.abilities.rtmp and self._data.ports.rtmp.enabled:
-                schema = "rtmp"
-                port = (
-                    self._data.ports.rtsp.port
-                    if self._data.ports.rtsp.port != 1935
-                    else None
-                )
-                template = f"bcs/channel{self._channel_id}_{self._stream_type.name.lower()}.bcs?channel={self._channel_id}&stream={self._stream_type}"
-            else:
-                schema = None
-                port = None
-
-            if schema is not None:
-                hostname = self._data.client.base_url
-                st = hostname.index("://") + 3
-                ed = hostname.find("://", st)
-                if ed < 0:
-                    ed = len(hostname)
-                hostname = hostname[st:ed]
-
-                port = f":{port}" if port is not None else ""
-                self._stream_url = f"{schema}://{hostname}{port}/{template}"
-                self._attr_supported_features |= SUPPORT_STREAM
+            self._stream_url = None
 
         self._additional_updates()
 
         super()._handle_coordinator_update()
 
     async def stream_source(self):
+        if self._stream_url is None:
+            if self._use_rtsp and self._data.abilities.rtsp:
+                self._stream_url = await self._data.client.get_rtsp_url(
+                    self._channel_id, self._stream_type
+                )
+            elif self._data.abilities.rtmp:
+                self._stream_url = await self._data.client.get_rtmp_url(
+                    self._channel_id, self._stream_type
+                )
+
         if self._stream_url is not None:
-            url = self._stream_url
-            token = self._data.client.token
-            if token is not None:
-                url += ("?" if url.find("?") < 0 else "&") + "token=" + token
-            return url
+            return self._stream_url
+
         return await super().stream_source()
 
     async def async_camera_image(
-        self, width: Optional[int] = None, height: Optional[int] = None
+        self, width: int | None = None, height: int | None = None
     ):
         if not self._channel_ability.snap:
             return await super().async_camera_image(width, height)
+
+        if time() < self._snap_spam_timeout:
+            return self._snap_spam_buffer
 
         result = await self._data.client.get_snap(self._channel_id)
         if result is None:
@@ -159,6 +144,8 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
             buffer += data
             if end_of_http_chunk:
                 pass
+        self._snap_spam_buffer = buffer
+        self._snap_spam_timeout = time() + 1000
         return buffer
 
     async def async_added_to_hass(self):

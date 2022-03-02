@@ -9,13 +9,13 @@
       "reolinkapi==0.0.1"
     ],
     "dependencies": [
-      "ffmpeg",
-      "webhook"
+      "camera"
     ],
     "after_dependencies": [
       "media_source",
-      "http",
-      "onvif"
+      "stream",
+      "onvif",
+      "webhook"
     ],
     "codeowners": [
       "@xannor"
