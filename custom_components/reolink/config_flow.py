@@ -16,11 +16,14 @@ import voluptuous as vol
 from reolinkapi.rest import Client as ReolinkClient
 from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
 from reolinkapi.rest.abilities import Abilities
+from reolinkapi.rest.abilities.channel import LiveAbilitySupport
+from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
 from reolinkapi.rest.system import DeviceInfo
 from reolinkapi.exceptions import ReolinkError
 from .const import (
     CONF_CHANNELS,
     CONF_PREFIX_CHANNEL,
+    CONF_STREAM_TYPE,
     CONF_USE_HTTPS,
     CONF_USE_RTSP,
     DEFAULT_PORT,
@@ -28,9 +31,12 @@ from .const import (
     DEFAULT_USE_HTTPS,
     DEFAULT_USE_RTSP,
     DOMAIN,
+    OutputStreamTypes,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+OUTPUT_STREAM_TYPES = {e: e.name for e in OutputStreamTypes}
 
 
 class ReolinkBaseConfigFlow:
@@ -134,7 +140,7 @@ class ReolinkBaseConfigFlow:
                 description={
                     "suggested_value": prior_input.get(CONF_PORT, DEFAULT_PORT)
                 },
-            ): cv.positive_int,
+            ): cv.port,
             vol.Required(
                 CONF_USE_HTTPS,
                 default=prior_input.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS),
@@ -155,6 +161,26 @@ class ReolinkBaseConfigFlow:
                 },
             ): str,
         }
+
+    @staticmethod
+    def _stream_schema(prior_input: dict, live: LiveAbilitySupport) -> dict:
+        schema = {}
+        if live in (LiveAbilitySupport.MAIN_SUB, LiveAbilitySupport.MAIN_EXTERN_SUB):
+            key = f"{CONF_STREAM_TYPE}_{CameraStreamTypes.MAIN.name.lower()}"
+            schema[vol.Required(key, default=prior_input.get(key, []))] = vol.All(
+                cv.ensure_list, [vol.In(OUTPUT_STREAM_TYPES)]
+            )
+            key = f"{CONF_STREAM_TYPE}_{CameraStreamTypes.SUB.name.lower()}"
+            schema[vol.Required(key, default=prior_input.get(key, []))] = vol.All(
+                cv.ensure_list, [vol.In(OUTPUT_STREAM_TYPES)]
+            )
+        if live == LiveAbilitySupport.MAIN_EXTERN_SUB:
+            key = f"{CONF_STREAM_TYPE}_{CameraStreamTypes.EXT.name.lower()}"
+            schema[vol.Required(key, default=prior_input.get(key, []))] = vol.All(
+                cv.ensure_list, [vol.In(OUTPUT_STREAM_TYPES)]
+            )
+
+        return schema
 
     @staticmethod
     def _channels_schema(prior_input: dict, channels: dict) -> dict:
@@ -309,12 +335,6 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         schema.update(
             ReolinkBaseConfigFlow._login_schema(user_input or self._config.data)
         )
-        schema[
-            vol.Required(
-                CONF_USE_RTSP,
-                default=(user_input or {}).get(CONF_USE_RTSP, DEFAULT_USE_RTSP),
-            )
-        ] = bool
         if self._channels is not None:
             schema.update(
                 ReolinkBaseConfigFlow._channels_schema(
