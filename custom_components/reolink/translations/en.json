@@ -1,59 +1,74 @@
 {
-    "title": "Reolink Device",
-    "config": {
-        "abort": {
-            "already_configured": "This device is already configured"
-        },
-        "error": {
-            "cannot_connect": "Failed to connect with the device",
-            "invalid_auth": "Invalid username or password",
-            "unknown": "Unexpected error",
-            "channel_required": "Channel selection is required"
-        },
-        "flow_title": "{name} ({type})",
-        "step": {
-            "connect": {
-                "title": "Connect",
-                "data": {
-                    "host": "Host",
-                    "port": "Port",
-                    "use_https": "Enable HTTPS"
-                }
-            },
-            "login": {
-                "title": "Login",
-                "data": {
-                  "username": "Username",
-                  "password": "Password"
-                }
-            },
-                "channels": {
-                "title": "Choose Channels",
-                "description": "Please choose one or more channels from the device.",
-                "data": {
-                    "prefix_channel": "Prefix channels with device name",
-                    "channels": "Channels"
-                }
-            }
+  "title": "Reolink Device",
+  "config": {
+    "abort": {
+      "already_configured": "This device is already configured"
+    },
+    "error": {
+      "cannot_connect": "Failed to connect with the device",
+      "invalid_auth": "Invalid username or password",
+      "unknown": "Unexpected error",
+      "channel_required": "Channel selection is required"
+    },
+    "flow_title": "{name} ({type})",
+    "step": {
+      "connect": {
+        "title": "Connect",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "use_https": "Enable HTTPS"
         }
-    },
-    "options": {
-        "step": {
-            "init": {
-              "description": "General Device Options",
-              "data": {
-                "host": "Host",
-                "port": "Port",
-                "use_https": "Enable HTTPS",
-                "username": "Username",
-                "password": "Password",
-                "use_rtsp": "Prefer RTSP",
-                "prefix_channel": "Prefix channels with device name",
-                "channels": "Channels"
-          }
-            }
-          }
-    },
-    "device_automation": {
+      },
+      "login": {
+        "title": "Login",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "channels": {
+        "title": "Choose Channels",
+        "description": "Please choose one or more channels from the device.",
+        "data": {
+          "prefix_channel": "Prefix channels with device name",
+          "channels": "Channels"
+        }
+      }
     }
+  },
+  "options": {
+    "step": {
+      "menu": {
+        "description": "Configuration Menu",
+        "data": {
+          "menu_choice": "Choose option to configure"
+        }
+      },
+      "init": {
+        "description": "General Device Options",
+        "data": {
+          "main_type": "Main Stream Type",
+          "sub_type": "Sub Stream Type",
+          "ext_type": "Ext Stream Type"
+        }
+      },
+      "channels": {
+        "title": "Update Channels",
+        "data": {
+          "prefix_channel": "Channel Prefix",
+          "channels": "Channels"
+        }
+      },
+      "channel": {
+        "title": "Configure Streams",
+        "data": {
+          "main_type": "Main Stream Type",
+          "sub_type": "Sub Stream Type",
+          "ext_type": "Ext Stream Type"
+        }
+      }
+    }
+  },
+  "device_automation": {}
 }

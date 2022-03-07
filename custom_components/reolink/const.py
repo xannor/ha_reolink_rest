@@ -31,7 +31,6 @@ CONF_USE_HTTPS = "use_https"
 CONF_CHANNELS = "channels"
 CONF_PREFIX_CHANNEL = "prefix_channel"
 CONF_USE_RTSP = "use_rtsp"
-CONF_STREAM_TYPE = "stream_type"
 
 DATA_ENTRY = "data"
 

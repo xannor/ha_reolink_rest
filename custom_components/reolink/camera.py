@@ -1,19 +1,18 @@
 """ Camera Platform """
 from __future__ import annotations
+from asyncio import Task
 
 import logging
-from time import time
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.components.camera import (
     Camera,
     SUPPORT_STREAM,
-    DOMAIN as CAMERA_DOMAIN,
 )
 
 from reolinkapi.rest.const import StreamTypes
-from reolinkapi.rest.abilities.channel import LiveAbilitySupport
+from reolinkapi.rest.typings.abilities.channel import LiveAbilityVers
 
 from .base import ReolinkEntity
 
@@ -21,11 +20,8 @@ from . import ReolinkEntityData
 from .const import (
     CONF_CHANNELS,
     CONF_PREFIX_CHANNEL,
-    CONF_STREAM_TYPE,
-    CONF_USE_RTSP,
     DATA_ENTRY,
     DEFAULT_STREAM_TYPE,
-    DEFAULT_USE_RTSP,
     DOMAIN,
     CAMERA_TYPES,
     OutputStreamTypes,
@@ -46,22 +42,26 @@ async def async_setup_entry(
     entities = []
 
     def _create_entities(channel: int):
-        live = entry_data.abilities.channel[channel].live.supported
-        if live in (LiveAbilitySupport.MAIN_SUB, LiveAbilitySupport.MAIN_EXTERN_SUB):
+        channel_abilities = entry_data.abilities["abilityChn"][channel]
+        live = channel_abilities["live"]["ver"]
+        if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
             entities.append(
                 ReolinkCameraEntity(hass, channel, StreamTypes.MAIN, config_entry)
             )
             entities.append(
                 ReolinkCameraEntity(hass, channel, StreamTypes.SUB, config_entry)
             )
-        if live == LiveAbilitySupport.MAIN_EXTERN_SUB:
+        if live == LiveAbilityVers.MAIN_EXTERN_SUB:
             entities.append(
                 ReolinkCameraEntity(hass, channel, StreamTypes.EXT, config_entry)
             )
 
     if entry_data.channels is not None and CONF_CHANNELS in config_entry.data:
         for _c in config_entry.data.get(CONF_CHANNELS, []):
-            if not next((ch for ch in entry_data.channels if ch.channel == _c)) is None:
+            if (
+                not next((ch for ch in entry_data.channels if ch["channel"] == _c))
+                is None
+            ):
                 _create_entities(_c)
     else:
         _create_entities(0)
@@ -89,28 +89,40 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
         self._connection_id: int = 0
         self._stream_url: str = None
         self._prefix_channel: bool = config_entry.data.get(CONF_PREFIX_CHANNEL)
-        self._attr_model = self._channel_status.type_info
-        self._attr_unique_id = f"{self._attr_brand}.{self._data.device_info.serial}.{CAMERA_DOMAIN}.{self._channel_id}.{self._stream_type.name}"
-        _output_types = config_entry.data.get(CONF_STREAM_TYPE, DEFAULT_STREAM_TYPE)
-        self._output_type: OutputStreamTypes = _output_types.get(stream_type)
-        self._attr_supported_features |= SUPPORT_STREAM
-        self._snap_spam_buffer: bytes | None = None
-        self._snap_spam_timeout: float = 0
+        self._attr_model = (
+            self._channel_status["typeInfo"]
+            if self._channel_status is not None
+            else self._data.device_info["model"]
+        )
+        self._attr_unique_id = (
+            f"{self._data.uid}.{self._channel_id}.{self._stream_type.name}"
+        )
+        key = f"channel_{channel_id}_{stream_type.name.lower()}_type"
+        self._output_type = config_entry.options.get(
+            key, DEFAULT_STREAM_TYPE[stream_type]
+        )
+        if self._output_type != OutputStreamTypes.MJPEG:
+            self._attr_supported_features |= SUPPORT_STREAM
+        self._snapshot_task: Task[bytes | None] | None = None
         self._additional_updates()
 
     def _additional_updates(self):
         _valid_types: list[OutputStreamTypes] = []
-        if self._channel_ability.snap.supported:
+        if self._channel_ability["snap"]["ver"]:
             _valid_types.append(OutputStreamTypes.MJPEG)
-        if self._data.abilities.rtmp:
+        if self._data.abilities["rtmp"]:
             _valid_types.append(OutputStreamTypes.RTMP)
-        if self._data.abilities.rtsp:
+        if self._data.abilities["rtsp"]:
             _valid_types.append(OutputStreamTypes.RTSP)
         if self._output_type is None or self._output_type not in _valid_types:
             self._output_type = _valid_types[0]
 
-        if self._prefix_channel and self._data.device_info.channels > 1:
-            self._attr_name = f"{self._data.device_info.name} {self._channel_status.name} {self._stream_type.name.title()}"
+        if self._prefix_channel and self._channel_status is not None:
+            self._attr_name = f'{self._data.ha_device_info["name"]} {self._channel_status["name"]} {self.entity_description.name}'
+        else:
+            self._attr_name = (
+                f'{self._data.ha_device_info["name"]} {self.entity_description.name}'
+            )
 
     @callback
     def _handle_coordinator_update(self):
@@ -141,23 +153,22 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ):
-        if not self._channel_ability.snap:
+        if not self._channel_ability["snap"]["ver"]:
             return await super().async_camera_image(width, height)
 
-        if time() < self._snap_spam_timeout:
-            return self._snap_spam_buffer
+        if self._snapshot_task is not None:
+            return await self._snapshot_task
 
-        result = await self._data.client.get_snap(self._channel_id)
-        if result is None:
-            return None
-        buffer = b""
-        async for data, end_of_http_chunk in result[0].iter_chunks():
-            buffer += data
-            if end_of_http_chunk:
-                pass
-        self._snap_spam_buffer = buffer
-        self._snap_spam_timeout = time() + 1000
-        return buffer
+        # create task for snapshot so camera does not get flooded
+        # with requests, instead it will only grab them
+        # "linearly" and multiple calls will return the
+        # same pending picture
+        self._snapshot_task = self.hass.async_create_task(
+            self._data.client.get_snap(self._channel_id)
+        )
+        snap = await self._snapshot_task
+        self._snapshot_task = None
+        return snap
 
     async def async_added_to_hass(self):
         self._handle_coordinator_update()

@@ -34,11 +34,20 @@ class ReolinkEntity(CoordinatorEntity):
 
     @property
     def _channel_ability(self):
-        return self._data.abilities.channel[self._channel_id]
+        return self._data.abilities["abilityChn"][self._channel_id]
 
     @property
     def _channel_status(self):
-        return self._data.channels[self._channel_id]
+        if self._data.channels is None:
+            return None
+        return next(
+            (
+                channel
+                for channel in self._data.channels
+                if channel["channel"] == self._channel_id
+            ),
+            None,
+        )
 
     async def async_added_to_hass(self):
         self._enabled = True

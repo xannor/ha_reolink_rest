@@ -38,21 +38,36 @@
   },
   "options": {
     "step": {
-      "init": {
+      "menu": {
+        "description": "Configuration Menu",
+        "data": {
+          "menu_choice": "Choose option to configure"
+        }
+      },
+      "options": {
         "description": "General Device Options",
         "data": {
-          "host": "[%key:common::config_flow::data::host%]",
-          "port": "[%key:common::config_flow::data::port%]",
-          "use_https": "[%key:common::config_flow::data::use_https%]",
-          "username": "[%key:common::config_flow::data::username%]",
-          "password": "[%key:common::config_flow::data::password%]",
-          "use_rtsp": "Prefer RTSP",
+          "main_type": "Main Stream Type",
+          "sub_type": "Sub Stream Type",
+          "ext_type": "Ext Stream Type"
+        }
+      },
+      "channels": {
+        "title": "Update Channels",
+        "data": {
           "prefix_channel": "Channel Prefix",
           "channels": "Channels"
+        }
+      },
+      "channel": {
+        "title": "Configure Streams",
+        "data": {
+          "main_type": "Main Stream Type",
+          "sub_type": "Sub Stream Type",
+          "ext_type": "Ext Stream Type"
         }
       }
     }
   },
-  "device_automation": {
-  }
+  "device_automation": {}
 }
