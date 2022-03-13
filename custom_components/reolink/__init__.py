@@ -50,7 +50,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR]
+PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR, Platform.LIGHT]
 
 
 def get_poll_interval(config_entry: ConfigEntry):

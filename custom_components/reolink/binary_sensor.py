@@ -454,7 +454,7 @@ class ReolinkMotionEntity(ReolinkEntity, BinarySensorEntity):
         super().__init__(entity_coordinator, channel_id, MOTION_TYPE[detection_type])
         BinarySensorEntity.__init__(
             self
-        )  # explicitly call Camera init since UpdateCoordinatorEntity does not super()
+        )  # explicitly call BinarySensorEntity init since UpdateCoordinatorEntity does not super()
         self._detection_type = detection_type
         self._prefix_channel: bool = self.coordinator.config_entry.data.get(
             CONF_PREFIX_CHANNEL

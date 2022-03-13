@@ -3,12 +3,14 @@
 from enum import IntEnum
 from typing import Final
 from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
-from reolinkapi.const import DetectionTypes
+from reolinkapi.const import DetectionTypes, LightTypes
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.components.camera import CameraEntityDescription
 from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
     BinarySensorDeviceClass,
 )
+from homeassistant.components.light import LightEntityDescription
 
 
 class OutputStreamTypes(IntEnum):
@@ -78,5 +80,18 @@ MOTION_TYPE: Final[dict[DetectionTypes, BinarySensorEntityDescription]] = {
         key="DetetctionTypes.Pet",
         name="Pet",
         device_class=BinarySensorDeviceClass.MOTION,
+    ),
+}
+
+LIGHT_TYPE: Final[dict[LightTypes, LightEntityDescription]] = {
+    LightTypes.IR: LightEntityDescription(
+        key="LightTyps.IR", name="IR", entity_category=EntityCategory.CONFIG
+    ),
+    LightTypes.POWER: LightEntityDescription(
+        key="LightTypes.Power", name="Power", entity_category=EntityCategory.CONFIG
+    ),
+    LightTypes.WHITE: LightEntityDescription(
+        key="LightTypes.White",
+        name="Floodlight",
     ),
 }
