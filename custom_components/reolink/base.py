@@ -1,58 +1,52 @@
 """"Base Components"""
 
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.config_entries import ConfigEntry
+from __future__ import annotations
+
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+)
 from homeassistant.helpers.entity import EntityDescription
 
-from . import ReolinkEntityData
+from .models import ReolinkEntityData
 
-from .const import DATA_ENTRY, DOMAIN
+from .const import DOMAIN
+from .typings import component
 
 
-class ReolinkEntity(CoordinatorEntity):
+class ReolinkEntity(CoordinatorEntity[ReolinkEntityData]):
     """Base class for Reolink Entities"""
 
     def __init__(
         self,
-        hass: HomeAssistant,
+        update_coordinator: DataUpdateCoordinator,
         channel_id: int,
-        config_entry: ConfigEntry,
         description: EntityDescription = None,
     ):
-        self.hass = hass
         self._channel_id = channel_id
-        self._data_key = config_entry.entry_id
-        super().__init__(self._data.update_coordinator)
+        super().__init__(update_coordinator)
         self.entity_description = description
         self._enabled = False
-        self._attr_device_info = self._data.ha_device_info
+        self._attr_device_info = self.coordinator.data.device_info
 
     @property
-    def _data(self) -> ReolinkEntityData:
-        return self.hass.data[DOMAIN][self._data_key][DATA_ENTRY]
+    def _client(self):
+        domain_data: dict[str, component.EntryData] = self.coordinator.hass.data[DOMAIN]
+        return domain_data[self.coordinator.config_entry.entry_id]["client"]
 
     @property
     def _channel_ability(self):
-        return self._data.abilities["abilityChn"][self._channel_id]
+        return self.coordinator.data.abilities["abilityChn"][self._channel_id]
 
     @property
     def _channel_status(self):
-        if self._data.channels is None:
+        if self.coordinator.data.channels is None:
             return None
         return next(
             (
                 channel
-                for channel in self._data.channels
+                for channel in self.coordinator.data.channels
                 if channel["channel"] == self._channel_id
             ),
             None,
         )
-
-    async def async_added_to_hass(self):
-        self._enabled = True
-        return await super().async_added_to_hass()
-
-    async def async_will_remove_from_hass(self) -> None:
-        self._enabled = False
-        return await super().async_will_remove_from_hass()

@@ -16,9 +16,10 @@ import voluptuous as vol
 from reolinkapi.rest import Client as ReolinkClient
 from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
 from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
-from reolinkapi.rest.typings.abilities import Abilities
-from reolinkapi.rest.typings.abilities.channel import LiveAbilityVers
-from reolinkapi.rest.typings.system import DeviceInfo
+from reolinkapi.typings.abilities import Abilities
+from reolinkapi.typings.abilities.channel import LiveAbilityVers
+from reolinkapi.typings.system import DeviceInfo
+from reolinkapi.rest.connection import Encryption
 from reolinkapi.exceptions import ReolinkError
 from .const import (
     CONF_CHANNELS,
@@ -60,7 +61,12 @@ class ReolinkBaseConfigFlow:
             port = self._data.get(CONF_PORT, DEFAULT_PORT)
             use_https = self._data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS)
             _timeout = self._data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
-            await client.connect(hostname, port, _timeout, use_https=use_https)
+            await client.connect(
+                hostname,
+                port,
+                _timeout,
+                encryption=Encryption.HTTPS if use_https else Encryption.AES,
+            )
 
             username = self._data.get(CONF_USERNAME, DEFAULT_USERNAME)
             password = self._data.get(CONF_PASSWORD, DEFAULT_PASSWORD)

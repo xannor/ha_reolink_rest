@@ -2,8 +2,13 @@
 
 from enum import IntEnum
 from typing import Final
-from reolinkapi.rest.const import StreamTypes as CameraTreamTypes
+from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
+from reolinkapi.const import DetectionTypes
 from homeassistant.components.camera import CameraEntityDescription
+from homeassistant.components.binary_sensor import (
+    BinarySensorEntityDescription,
+    BinarySensorDeviceClass,
+)
 
 
 class OutputStreamTypes(IntEnum):
@@ -22,9 +27,9 @@ DEFAULT_PREFIX_CHANNEL = True
 DEFAULT_SCAN_INTERVAL = 60
 DEFAULT_USE_RTSP = False
 DEFAULT_STREAM_TYPE = {
-    CameraTreamTypes.MAIN: OutputStreamTypes.RTMP,
-    CameraTreamTypes.SUB: OutputStreamTypes.RTMP,
-    CameraTreamTypes.EXT: OutputStreamTypes.RTMP,
+    CameraStreamTypes.MAIN: OutputStreamTypes.RTMP,
+    CameraStreamTypes.SUB: OutputStreamTypes.RTMP,
+    CameraStreamTypes.EXT: OutputStreamTypes.RTMP,
 }
 
 CONF_USE_HTTPS = "use_https"
@@ -32,19 +37,46 @@ CONF_CHANNELS = "channels"
 CONF_PREFIX_CHANNEL = "prefix_channel"
 CONF_USE_RTSP = "use_rtsp"
 
-DATA_ENTRY = "data"
-
-CAMERA_TYPES: Final[dict[CameraTreamTypes, CameraEntityDescription]] = {
-    CameraTreamTypes.MAIN: CameraEntityDescription(
+CAMERA_TYPES: Final[dict[CameraStreamTypes, CameraEntityDescription]] = {
+    CameraStreamTypes.MAIN: CameraEntityDescription(
         key="StreamType.main",
         name="Main",
     ),
-    CameraTreamTypes.SUB: CameraEntityDescription(
+    CameraStreamTypes.SUB: CameraEntityDescription(
         key="StreamType.sub",
         name="Sub",
         entity_registry_enabled_default=False,
     ),
-    CameraTreamTypes.EXT: CameraEntityDescription(
+    CameraStreamTypes.EXT: CameraEntityDescription(
         key="StreamType.ext", name="Ext", entity_registry_enabled_default=False
+    ),
+}
+
+
+MOTION_TYPE: Final[dict[DetectionTypes, BinarySensorEntityDescription]] = {
+    DetectionTypes.NONE: BinarySensorEntityDescription(
+        key="DetectionType.None",
+        name="Motion",
+        device_class=BinarySensorDeviceClass.MOTION,
+    ),
+    DetectionTypes.PEOPLE: BinarySensorEntityDescription(
+        key="DetetctionTypes.Person",
+        name="Person",
+        device_class=BinarySensorDeviceClass.MOTION,
+    ),
+    DetectionTypes.VEHICLE: BinarySensorEntityDescription(
+        key="DetetctionTypes.Vehicle",
+        name="Vehicle",
+        device_class=BinarySensorDeviceClass.MOTION,
+    ),
+    DetectionTypes.ANIMAL: BinarySensorEntityDescription(
+        key="DetetctionTypes.Animal",
+        name="Animal",
+        device_class=BinarySensorDeviceClass.MOTION,
+    ),
+    DetectionTypes.PET: BinarySensorEntityDescription(
+        key="DetetctionTypes.Pet",
+        name="Pet",
+        device_class=BinarySensorDeviceClass.MOTION,
     ),
 }

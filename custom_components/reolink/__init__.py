@@ -1,10 +1,13 @@
 """ Reolink Intergration """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
+from re import U
+import aiohttp
 
-from attr import asdict
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -18,23 +21,28 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.entity import DeviceInfo
 
 from reolinkapi.rest import Client
-from reolinkapi.rest.typings import system as rs, network as rn, abilities as ra
+from reolinkapi.rest.connection import Encryption
+from reolinkapi.typings import system as rs, network as rn, abilities as ra
 from reolinkapi.const import DEFAULT_TIMEOUT
 from reolinkapi.exceptions import ReolinkError
+from reolinkapi.helpers.ability import NO_ABILITY
 
 import async_timeout
+
+from . import base
+from .typings import component
 
 from .utility import astypeddict
 
 from .const import (
     CONF_CHANNELS,
     CONF_USE_HTTPS,
-    DATA_ENTRY,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_USE_HTTPS,
     DOMAIN,
@@ -42,26 +50,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [Platform.CAMERA]
-
-
-@dataclass
-class ReolinkEntityData:
-    """Entity Data"""
-
-    client: Client = field(default_factory=Client)
-    uid: str = field(default="")
-    update_coordinator: DataUpdateCoordinator = field(default=None)
-    ha_device_info: DeviceInfo = field(default=None)
-    device_info: rs.DeviceInfo = field(default=None)
-    abilities: ra.Abilities = field(default=None)
-    channels: list[rn.ChannelStatus] = field(default=None)
-    ports: rn.NetworkPorts = field(default=None)
-
-    @property
-    def connection_id(self):
-        """Connection ID"""
-        return self.client.connection_id
+PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR]
 
 
 def get_poll_interval(config_entry: ConfigEntry):
@@ -74,131 +63,173 @@ def get_poll_interval(config_entry: ConfigEntry):
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     """Setup Device"""
 
+    domain_data: component.DomainData | dict[
+        str, component.EntryData
+    ] = hass.data.setdefault(DOMAIN, {})
+
     if not config_entry.options:
         hass.config_entries.async_update_entry(
             config_entry, options={CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL}
         )
 
-    entry_data = ReolinkEntityData()
-    await entry_data.client.connect(
+    client = Client(
+        lambda base_url, timeout: async_create_clientsession(
+            hass, False, base_url=base_url, timeout=aiohttp.ClientTimeout(total=timeout)
+        )
+    )
+    await client.connect(
         config_entry.data.get(CONF_HOST),
         config_entry.data.get(CONF_PORT),
         config_entry.data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
-        use_https=config_entry.data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS),
+        encryption=Encryption.HTTPS
+        if config_entry.data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS)
+        else Encryption.AES,
     )
 
-    hass.data.setdefault(DOMAIN, {})
+    with async_timeout.timeout(10):
+        if not await client.login(
+            config_entry.data.get(CONF_USERNAME),
+            config_entry.data.get(CONF_PASSWORD),
+        ):
+            raise ConfigEntryAuthFailed()
 
-    try:
-        with async_timeout.timeout(10):
-            if not await entry_data.client.login(
-                config_entry.data.get(CONF_USERNAME),
-                config_entry.data.get(CONF_PASSWORD),
-            ):
-                raise ConfigEntryAuthFailed()
-    except ReolinkError as _re:
-        raise ConfigEntryNotReady(_re) from None
+    if not client.authenticated:
+        raise ConfigEntryNotReady()
 
     device: dr.DeviceEntry = None
+    abilities: ra.Abilities = None
+    client_device_info: rs.DeviceInfo = None
+    device_info: DeviceInfo = None
 
     async def _update_data():
-        nonlocal device
-        if not entry_data.client.authenticated:
-            if not await entry_data.client.login(
+        nonlocal device, abilities, client_device_info, device_info
+        if not client.authenticated:
+            if not await client.login(
                 config_entry.data.get(CONF_USERNAME),
                 config_entry.data.get(CONF_PASSWORD),
             ):
+                await client.disconnect()
                 raise ConfigEntryAuthFailed()
 
         commands = []
-        abils = entry_data.abilities
-        if entry_data.abilities is None:
-            abils = entry_data.abilities = await entry_data.client.get_ability()
-            if entry_data.abilities is None:
-                await entry_data.client.disconnect()
-                raise ConfigEntryNotReady()
+        if abilities is None:
+            abilities = await client.get_ability()
+            if abilities is None:
+                return await _update_data()
         else:
             commands.append(Client.create_get_ability())
 
         commands.append(Client.create_get_network_ports())
 
-        if entry_data.abilities["p2p"]["ver"]:
+        if abilities.get("p2p", NO_ABILITY)["ver"]:
             commands.append(Client.create_get_p2p())
 
-        if entry_data.abilities["localLink"]["ver"]:
+        if abilities.get("localLink", NO_ABILITY)["ver"]:
             commands.append(Client.create_get_local_link())
 
-        if entry_data.abilities["devInfo"]["ver"]:
+        if abilities.get("devInfo", NO_ABILITY)["ver"]:
             commands.append(Client.create_get_device_info())
             if (
-                entry_data.device_info is not None
-                and entry_data.device_info["channelNum"] > 1
+                client_device_info is not None
+                and client_device_info.get("channelNum", 0) > 1
             ):
                 commands.append(Client.create_get_channel_status())
 
-        responses = await entry_data.client.batch(commands)
-        entry_data.abilities = next(Client.get_ability_responses(responses), abils)
-        if entry_data.abilities is None:
-            await entry_data.client.disconnect()
+        responses = await client.batch(commands)
+        if Client.has_auth_failure(responses):
+            await client.logout()
+            return await _update_data()
+        abilities = next(Client.get_ability_responses(responses), abilities)
+        if abilities is None:
+            await client.disconnect()
             raise ConfigEntryNotReady()
-        entry_data.ports = next(Client.get_network_ports_responses(responses), None)
-        if entry_data.ports is None:
-            await entry_data.client.disconnect()
+        ports = next(Client.get_network_ports_responses(responses), None)
+        if ports is None:
+            await client.disconnect()
             raise ConfigEntryNotReady()
         p2p = next(Client.get_p2p_responses(responses), None)
-        if p2p is not None:
-            entry_data.uid = p2p["uid"]
         link = next(Client.get_local_link_responses(responses), None)
-        entry_data.device_info = next(Client.get_device_info_responses(responses), None)
-        channels = next(Client.get_channel_status_responses(responses), None)
-        entry_data.channels = channels["status"] if channels is not None else None
+        client_device_info = next(
+            Client.get_device_info_responses(responses), client_device_info
+        )
+        _channels = next(Client.get_channel_status_responses(responses), None)
+        channels = _channels["status"] if _channels is not None else None
+        if (
+            channels is None
+            and client_device_info is not None
+            and client_device_info["channelNum"] > 1
+        ):
+            channels = await client.get_channel_status()
 
-        if entry_data.device_info is not None:
-            if entry_data.device_info["channelNum"] > 1 and entry_data.channels is None:
-                entry_data.channels = await entry_data.client.get_channel_status()
-            if entry_data.uid is None:
-                entry_data.uid = f'{entry_data.device_info["type"]}-{entry_data.device_info["serial"]}'
+        device_registry = dr.async_get(hass)
+        if device is None:
+            _type = (
+                client_device_info.get("exactType", client_device_info["type"])
+                if client_device_info is not None
+                else ""
+            )
+            uid = (
+                p2p["uid"]
+                if p2p is not None
+                else f'{_type}-{client_device_info["serial"]}'
+                if client_device_info is not None
+                else None
+            )
+            identifiers = {(DOMAIN, uid)} if uid is not None else None
             connections = (
                 {(dr.CONNECTION_NETWORK_MAC, link["mac"])} if link is not None else None
             )
 
-            device_registry = dr.async_get(hass)
-            if device is None:
-                device = device_registry.async_get_or_create(
-                    config_entry_id=config_entry.entry_id,
-                    default_manufacturer="Reolink",
-                    default_name=entry_data.device_info["name"],
-                    identifiers={(DOMAIN, entry_data.uid)},
-                    connections=connections,
-                    sw_version=entry_data.device_info["firmVer"],
-                    hw_version=entry_data.device_info["hardVer"],
-                    default_model=entry_data.device_info["model"],
-                    configuration_url=entry_data.client.base_url,
-                )
-                entry_data.ha_device_info = DeviceInfo(astypeddict(device, DeviceInfo))
-            else:
-                device = device_registry.async_update_device(
-                    device.id,
-                    name=entry_data.device_info["name"],
-                    configuration_url=entry_data.client.base_url,
-                )
-                entry_data.ha_device_info.update(astypeddict(device, DeviceInfo))
-        elif entry_data.uid is None:
-            entry_data.uid = config_entry.entry_id
+            device = device_registry.async_get_or_create(
+                config_entry_id=config_entry.entry_id,
+                default_manufacturer="Reolink",
+                default_name=client_device_info["name"],
+                identifiers=identifiers,
+                connections=connections,
+                sw_version=client_device_info["firmVer"],
+                hw_version=client_device_info["hardVer"],
+                default_model=client_device_info["model"],
+                configuration_url=client.base_url,
+            )
+            device_info = DeviceInfo(astypeddict(device, DeviceInfo))
+        else:
+            device = device_registry.async_update_device(
+                device.id,
+                name=client_device_info["name"],
+                configuration_url=client.base_url,
+            )
+            device_info.update(astypeddict(device, DeviceInfo))
 
-        entry_data.update_coordinator.name = f"Reolink-device-{entry_data.uid}"
+        return base.ReolinkEntityData(
+            client.connection_id,
+            next(map(lambda t: t[1], device.identifiers))
+            if device.identifiers is not None
+            else link["mac"]
+            if link is not None
+            else "",
+            abilities,
+            channels,
+            ports,
+            client_device_info,
+            device_info,
+        )
 
-    entry_data.update_coordinator = DataUpdateCoordinator(
+    update_coordinator = DataUpdateCoordinator(
         hass,
         _LOGGER,
-        name="Reolink-device",
+        name="Reolink-device-common-data",
         update_interval=get_poll_interval(config_entry),
         update_method=_update_data,
     )
 
-    await entry_data.update_coordinator.async_config_entry_first_refresh()
+    await update_coordinator.async_config_entry_first_refresh()
 
-    hass.data[DOMAIN][config_entry.entry_id] = {DATA_ENTRY: entry_data}
+    entry_data: component.EntryData = {
+        "client": client,
+        "coordinator": update_coordinator,
+    }
+    domain_data[config_entry.entry_id] = entry_data
+
     hass.config_entries.async_setup_platforms(config_entry, PLATFORMS)
 
     if not config_entry.update_listeners:
@@ -215,10 +246,14 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         config_entry, PLATFORMS
     )
     if unload_ok:
-        entry = hass.data[DOMAIN][config_entry.entry_id]
-        entry_data: ReolinkEntityData = entry[DATA_ENTRY]
-        await entry_data.client.disconnect()
-        hass.data[DOMAIN].pop(config_entry.entry_id)
+        domain_data: dict[str, component.EntryData] = hass.data.get(DOMAIN, None)
+        entry_data = (
+            domain_data.pop(config_entry.entry_id, None)
+            if domain_data is not None
+            else None
+        )
+        if entry_data is not None:
+            await entry_data["client"].disconnect()
 
     return unload_ok
 
