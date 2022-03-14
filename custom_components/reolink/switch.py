@@ -1,1 +1,0 @@
-"""Swithc Platform"""

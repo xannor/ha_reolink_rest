@@ -91,7 +91,6 @@ LIGHT_TYPE: Final[dict[LightTypes, LightEntityDescription]] = {
         key="LightTypes.Power", name="Power", entity_category=EntityCategory.CONFIG
     ),
     LightTypes.WHITE: LightEntityDescription(
-        key="LightTypes.White",
-        name="Floodlight",
+        key="LightTypes.White", name="Floodlight", entity_category=EntityCategory.CONFIG
     ),
 }
