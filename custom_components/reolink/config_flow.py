@@ -11,6 +11,7 @@ from homeassistant.const import (
     CONF_PORT,
     CONF_TIMEOUT,
     CONF_USERNAME,
+    CONF_SCAN_INTERVAL,
 )
 import voluptuous as vol
 from reolinkapi.rest import Client as ReolinkClient
@@ -21,12 +22,18 @@ from reolinkapi.typings.abilities.channel import LiveAbilityVers
 from reolinkapi.typings.system import DeviceInfo
 from reolinkapi.rest.connection import Encryption
 from reolinkapi.exceptions import ReolinkError
+
+from .entity import EntityDataUpdateCoordinator
 from .const import (
     CONF_CHANNELS,
+    CONF_MOTION_INTERVAL,
     CONF_PREFIX_CHANNEL,
     CONF_USE_HTTPS,
+    DATA_COORDINATOR,
+    DEFAULT_MOTION_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_PREFIX_CHANNEL,
+    DEFAULT_SCAN_INTERVAL,
     DEFAULT_STREAM_TYPE,
     DEFAULT_USE_HTTPS,
     DOMAIN,
@@ -230,7 +237,26 @@ class ReolinkBaseConfigFlow:
                 vol.In(supported_output_types),
             )
 
-        schema = []
+        schema = [
+            (
+                vol.Required(
+                    CONF_SCAN_INTERVAL,
+                    default=prior_input.get(
+                        CONF_SCAN_INTERVAL, DEFAULT_MOTION_INTERVAL
+                    ),
+                ),
+                cv.positive_int,
+            ),
+            (
+                vol.Required(
+                    CONF_MOTION_INTERVAL,
+                    default=prior_input.get(
+                        CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL
+                    ),
+                ),
+                cv.positive_int,
+            ),
+        ]
 
         if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
             schema.append(_create_schema(CameraStreamTypes.MAIN))
@@ -367,6 +393,36 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         self._options = (
             config_entry.options.copy() if config_entry.options is not None else {}
         )
+        self._entry_id = config_entry.entry_id
+        self._data_coordinator: EntityDataUpdateCoordinator = None
+
+    async def _update_client_data(self):
+        if self._data_coordinator is None and self._connection_id == 0:
+            domain_data = self.hass.data[DOMAIN]
+            entry_data = domain_data[self._entry_id]
+            self._data_coordinator: EntityDataUpdateCoordinator = entry_data[
+                DATA_COORDINATOR
+            ]
+            self._connection_id = self._data_coordinator.client.connection_id
+            self._auth_id = self._data_coordinator.client.authentication_id
+            self._authenticated = True
+
+        if (
+            self._data_coordinator.client.connection_id != self._connection_id
+            or self._data_coordinator.client.authentication_id != self._auth_id
+        ):
+            return await super()._update_client_data()
+
+        self._abilities = self._data_coordinator.data.abilities
+        self._devinfo = self._data_coordinator.data.client_device_info
+        self._channels = (
+            {
+                channel["channel"]: channel["name"]
+                for channel in self._data_coordinator.data.channels
+            }
+            if self._data_coordinator.data.channels is not None
+            else None
+        )
 
     async def async_step_init(self, user_input: dict[str, any] = None):
         """init"""
@@ -471,7 +527,7 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         return user_input
 
     def _get_output_streams(self):
-        output_types = list()
+        output_types: list[OutputStreamTypes] = []
         if self._abilities["rtsp"]["ver"]:
             output_types.append(OutputStreamTypes.RTSP)
         if self._abilities["rtmp"]["ver"]:

@@ -1,16 +1,16 @@
 """Constants"""
+from __future__ import annotations
+from datetime import timedelta
 
 from enum import IntEnum
 from typing import Final
 from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
-from reolinkapi.const import DetectionTypes, LightTypes
-from homeassistant.helpers.entity import EntityCategory
+from reolinkapi.models.ai import AITypes
 from homeassistant.components.camera import CameraEntityDescription
 from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
     BinarySensorDeviceClass,
 )
-from homeassistant.components.light import LightEntityDescription
 
 
 class OutputStreamTypes(IntEnum):
@@ -27,17 +27,19 @@ DEFAULT_PORT = 0
 DEFAULT_USE_HTTPS = False
 DEFAULT_PREFIX_CHANNEL = True
 DEFAULT_SCAN_INTERVAL = 60
-DEFAULT_USE_RTSP = False
+DEFAULT_MOTION_INTERVAL = 10
 DEFAULT_STREAM_TYPE = {
     CameraStreamTypes.MAIN: OutputStreamTypes.RTMP,
     CameraStreamTypes.SUB: OutputStreamTypes.RTMP,
     CameraStreamTypes.EXT: OutputStreamTypes.RTMP,
 }
+DEFAULT_USE_AES = False
 
 CONF_USE_HTTPS = "use_https"
 CONF_CHANNELS = "channels"
 CONF_PREFIX_CHANNEL = "prefix_channel"
-CONF_USE_RTSP = "use_rtsp"
+CONF_MOTION_INTERVAL = "motion_interval"
+CONF_USE_AES = "use_aes"
 
 CAMERA_TYPES: Final[dict[CameraStreamTypes, CameraEntityDescription]] = {
     CameraStreamTypes.MAIN: CameraEntityDescription(
@@ -54,43 +56,52 @@ CAMERA_TYPES: Final[dict[CameraStreamTypes, CameraEntityDescription]] = {
     ),
 }
 
+DATA_COORDINATOR = "coordinator"
+DATA_MOTION_COORDINATOR = "motion_coordinator"
 
-MOTION_TYPE: Final[dict[DetectionTypes, BinarySensorEntityDescription]] = {
-    DetectionTypes.NONE: BinarySensorEntityDescription(
+
+class _AI_Type_None:
+    pass
+
+
+AI_TYPE_NONE = _AI_Type_None
+
+MOTION_TYPE: Final[dict[AITypes | AI_TYPE_NONE, BinarySensorEntityDescription]] = {
+    AI_TYPE_NONE: BinarySensorEntityDescription(
         key="DetectionType.None",
         name="Motion",
         device_class=BinarySensorDeviceClass.MOTION,
     ),
-    DetectionTypes.PEOPLE: BinarySensorEntityDescription(
+    AITypes.PEOPLE: BinarySensorEntityDescription(
         key="DetetctionTypes.Person",
         name="Person",
         device_class=BinarySensorDeviceClass.MOTION,
     ),
-    DetectionTypes.VEHICLE: BinarySensorEntityDescription(
+    AITypes.VEHICLE: BinarySensorEntityDescription(
         key="DetetctionTypes.Vehicle",
         name="Vehicle",
         device_class=BinarySensorDeviceClass.MOTION,
     ),
-    DetectionTypes.ANIMAL: BinarySensorEntityDescription(
+    AITypes.ANIMAL: BinarySensorEntityDescription(
         key="DetetctionTypes.Animal",
         name="Animal",
         device_class=BinarySensorDeviceClass.MOTION,
     ),
-    DetectionTypes.PET: BinarySensorEntityDescription(
+    AITypes.PET: BinarySensorEntityDescription(
         key="DetetctionTypes.Pet",
         name="Pet",
         device_class=BinarySensorDeviceClass.MOTION,
     ),
 }
 
-LIGHT_TYPE: Final[dict[LightTypes, LightEntityDescription]] = {
-    LightTypes.IR: LightEntityDescription(
-        key="LightTyps.IR", name="IR", entity_category=EntityCategory.CONFIG
-    ),
-    LightTypes.POWER: LightEntityDescription(
-        key="LightTypes.Power", name="Power", entity_category=EntityCategory.CONFIG
-    ),
-    LightTypes.WHITE: LightEntityDescription(
-        key="LightTypes.White", name="Floodlight", entity_category=EntityCategory.CONFIG
-    ),
-}
+# LIGHT_TYPE: Final[dict[LightTypes, LightEntityDescription]] = {
+#    LightTypes.IR: LightEntityDescription(
+#        key="LightTyps.IR", name="IR", entity_category=EntityCategory.CONFIG
+#    ),
+#    LightTypes.POWER: LightEntityDescription(
+#        key="LightTypes.Power", name="Power", entity_category=EntityCategory.CONFIG
+#    ),
+#    LightTypes.WHITE: LightEntityDescription(
+#        key="LightTypes.White", name="Floodlight", entity_category=EntityCategory.CONFIG
+#    ),
+# }

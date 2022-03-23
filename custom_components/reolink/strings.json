@@ -47,6 +47,8 @@
       "options": {
         "description": "General Device Options",
         "data": {
+          "scan_interval": "Polling Interval",
+          "motion_interval": "Polling Motion Interval",
           "main_type": "Main Stream Type",
           "sub_type": "Sub Stream Type",
           "ext_type": "Ext Stream Type"

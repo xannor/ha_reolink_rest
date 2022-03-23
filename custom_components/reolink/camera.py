@@ -12,16 +12,19 @@ from homeassistant.components.camera import (
 )
 
 from reolinkapi.rest.const import StreamTypes
-from reolinkapi.typings.abilities.channel import LiveAbilityVers
-from reolinkapi.helpers.ability import NO_ABILITY, NO_CHANNEL_ABILITIES
+from reolinkapi.typings.abilities.channel import (
+    LiveAbilityVers,
+    EncodingTypeAbilityVers,
+)
+from reolinkapi.helpers.abilities.ability import NO_ABILITY, NO_CHANNEL_ABILITIES
 
-from .typings import component
 
-from .base import ReolinkEntity
+from .entity import EntityDataUpdateCoordinator, ReolinkEntity
 
 from .const import (
     CONF_CHANNELS,
     CONF_PREFIX_CHANNEL,
+    DATA_COORDINATOR,
     DEFAULT_STREAM_TYPE,
     DOMAIN,
     CAMERA_TYPES,
@@ -38,30 +41,28 @@ async def async_setup_entry(
 ):
     """Setup camera platform"""
 
-    domain_data: component.DomainData | dict[str, component.EntryData] = hass.data[
-        DOMAIN
-    ]
-    entry_data: component.EntryData = domain_data[config_entry.entry_id]
-    entity_data = entry_data["coordinator"].data
+    domain_data: dict = hass.data[DOMAIN]
+    entry_data: dict = domain_data[config_entry.entry_id]
+    data_coordinator: EntityDataUpdateCoordinator = entry_data[DATA_COORDINATOR]
 
     entities = []
 
     def _create_entities(channel: int):
-        channel_abilities = entity_data.abilities.get(
+        channel_abilities = data_coordinator.data.abilities.get(
             "abilityChn", [NO_CHANNEL_ABILITIES]
         )[channel]
         live = channel_abilities.get("live", NO_ABILITY)["ver"]
         if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
             entities.append(
                 ReolinkCameraEntity(
-                    entry_data["coordinator"],
+                    data_coordinator,
                     channel,
                     StreamTypes.MAIN,
                 )
             )
             entities.append(
                 ReolinkCameraEntity(
-                    entry_data["coordinator"],
+                    data_coordinator,
                     channel,
                     StreamTypes.SUB,
                 )
@@ -69,16 +70,21 @@ async def async_setup_entry(
         if live == LiveAbilityVers.MAIN_EXTERN_SUB:
             entities.append(
                 ReolinkCameraEntity(
-                    entry_data["coordinator"],
+                    data_coordinator,
                     channel,
                     StreamTypes.EXT,
                 )
             )
 
-    if entity_data.channels is not None and CONF_CHANNELS in config_entry.data:
+    if (
+        data_coordinator.data.channels is not None
+        and CONF_CHANNELS in config_entry.data
+    ):
         for _c in config_entry.data.get(CONF_CHANNELS, []):
             if (
-                not next((ch for ch in entity_data.channels if ch["channel"] == _c))
+                not next(
+                    (ch for ch in data_coordinator.data.channels if ch["channel"] == _c)
+                )
                 is None
             ):
                 _create_entities(_c)
@@ -140,6 +146,12 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
             _valid_types.append(OutputStreamTypes.RTMP)
         if self.coordinator.data.abilities.get("rtsp", NO_ABILITY)["ver"]:
             _valid_types.append(OutputStreamTypes.RTSP)
+        if (
+            self._stream_type == StreamTypes.MAIN
+            and self._channel_ability["mainEncType"]["ver"]
+            == EncodingTypeAbilityVers.H265
+        ):
+            _valid_types.remove(OutputStreamTypes.RTMP)
         if self._output_type is None or self._output_type not in _valid_types:
             self._output_type = _valid_types[0]
         if self._prefix_channel and self._channel_status is not None:
@@ -160,11 +172,11 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
     async def stream_source(self):
         if self._stream_url is None:
             if self._output_type == OutputStreamTypes.RTSP:
-                self._stream_url = await self._client.get_rtsp_url(
+                self._stream_url = await self.coordinator.client.get_rtsp_url(
                     self._channel_id, self._stream_type
                 )
             elif self._output_type == OutputStreamTypes.RTMP:
-                self._stream_url = await self._client.get_rtmp_url(
+                self._stream_url = await self.coordinator.client.get_rtmp_url(
                     self._channel_id, self._stream_type
                 )
 
@@ -187,7 +199,7 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
         # "linearly" and multiple calls will return the
         # same pending picture
         self._snapshot_task = self.hass.async_create_task(
-            self._client.get_snap(self._channel_id)
+            self.coordinator.client.get_snap(self._channel_id)
         )
         snap = None
         try:
