@@ -65,13 +65,19 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     domain_data: dict = hass.data.setdefault(DOMAIN, {})
 
     if not config_entry.options:
+        options = {
+            CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
+            CONF_MOTION_INTERVAL: DEFAULT_MOTION_INTERVAL,
+            CONF_USE_AES: DEFAULT_USE_AES,
+        }
+        data = config_entry.data.copy()
+        channels = data.pop(CONF_CHANNELS, None)
+        if channels is not None:
+            options[CONF_CHANNELS] = channels
         hass.config_entries.async_update_entry(
             config_entry,
-            options={
-                CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
-                CONF_MOTION_INTERVAL: DEFAULT_MOTION_INTERVAL,
-                CONF_USE_AES: DEFAULT_USE_AES,
-            },
+            data=data,
+            options=options,
         )
 
     client = Client(
@@ -150,12 +156,4 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
 
 async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry):
     """Update options."""
-    if CONF_CHANNELS in config_entry.options:
-        data = config_entry.data.copy()
-        options = config_entry.options.copy()
-        data[CONF_CHANNELS] = options.pop(CONF_CHANNELS)
-        if hass.config_entries.async_update_entry(
-            config_entry, data=data, options=options
-        ):
-            return
     await hass.config_entries.async_reload(config_entry.entry_id)

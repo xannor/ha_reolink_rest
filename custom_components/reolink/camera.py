@@ -11,7 +11,7 @@ from homeassistant.components.camera import (
     SUPPORT_STREAM,
 )
 
-from reolinkapi.rest.const import StreamTypes
+from reolinkapi.const import StreamTypes
 from reolinkapi.typings.abilities.channel import (
     LiveAbilityVers,
     EncodingTypeAbilityVers,
@@ -78,9 +78,9 @@ async def async_setup_entry(
 
     if (
         data_coordinator.data.channels is not None
-        and CONF_CHANNELS in config_entry.data
+        and CONF_CHANNELS in config_entry.options
     ):
-        for _c in config_entry.data.get(CONF_CHANNELS, []):
+        for _c in config_entry.options.get(CONF_CHANNELS, []):
             if (
                 not next(
                     (ch for ch in data_coordinator.data.channels if ch["channel"] == _c)

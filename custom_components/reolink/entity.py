@@ -19,10 +19,10 @@ from homeassistant.helpers.entity import EntityDescription, DeviceInfo
 
 from reolinkapi.rest import Client
 from reolinkapi.typings import system as rs, network as rn, abilities as ra
-from reolinkapi.helpers.ability import NO_ABILITY
+from reolinkapi.helpers.abilities.ability import NO_ABILITY
+from reolinkapi import helpers as clientHelpers
 
 from .const import DOMAIN
-from .typings import component
 from .utility import astypeddict
 
 
@@ -96,42 +96,47 @@ class EntityDataUpdateCoordinator(DataUpdateCoordinator[EntityData]):
             if abilities is None:
                 raise ConfigEntryNotReady()
         else:
-            commands.append(Client.create_get_ability())
+            commands.append(clientHelpers.system.create_get_ability())
 
-        commands.append(Client.create_get_network_ports())
+        commands.append(clientHelpers.network.create_get_network_ports())
 
         if abilities.get("p2p", NO_ABILITY)["ver"]:
-            commands.append(Client.create_get_p2p())
+            commands.append(clientHelpers.network.create_get_p2p())
 
         if abilities.get("localLink", NO_ABILITY)["ver"]:
-            commands.append(Client.create_get_local_link())
+            commands.append(clientHelpers.network.create_get_local_link())
 
         if abilities.get("devInfo", NO_ABILITY)["ver"]:
-            commands.append(Client.create_get_device_info())
+            commands.append(clientHelpers.system.create_get_device_info())
             if (
                 client_device_info is not None
                 and client_device_info.get("channelNum", 0) > 1
             ):
-                commands.append(Client.create_get_channel_status())
+                commands.append(clientHelpers.network.create_get_channel_status())
 
         responses = await self.client.batch(commands)
-        if Client.has_auth_failure(responses):
+        if clientHelpers.security.has_auth_failure(responses):
             await self.client.logout()
             return await self._async_update_data()
-        abilities = next(Client.get_ability_responses(responses), abilities)
+        abilities = next(
+            clientHelpers.system.get_ability_responses(responses), abilities
+        )
         if abilities is None:
             await self.client.disconnect()
             raise ConfigEntryNotReady()
-        ports = next(Client.get_network_ports_responses(responses), None)
+        ports = next(clientHelpers.network.get_network_ports_responses(responses), None)
         if ports is None:
             await self.client.disconnect()
             raise ConfigEntryNotReady()
-        p2p = next(Client.get_p2p_responses(responses), None)
-        link = next(Client.get_local_link_responses(responses), None)
+        p2p = next(clientHelpers.network.get_p2p_responses(responses), None)
+        link = next(clientHelpers.network.get_local_link_responses(responses), None)
         client_device_info = next(
-            Client.get_device_info_responses(responses), client_device_info
+            clientHelpers.system.get_devinfo_responses(responses),
+            client_device_info,
         )
-        _channels = next(Client.get_channel_status_responses(responses), None)
+        _channels = next(
+            clientHelpers.network.get_channel_status_responses(responses), None
+        )
         channels = _channels["status"] if _channels is not None else None
         if (
             channels is None

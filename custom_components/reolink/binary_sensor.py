@@ -23,7 +23,8 @@ from reolinkapi.rest import Client
 from reolinkapi.typings.abilities.channel import ChannelAbilities
 from reolinkapi.typings.ai import AiAlarmState
 from reolinkapi.models.ai import AITypes
-from reolinkapi.helpers.ability import NO_ABILITY, NO_CHANNEL_ABILITIES
+from reolinkapi.helpers.abilities.ability import NO_ABILITY, NO_CHANNEL_ABILITIES
+from reolinkapi import helpers as clientHelpers
 
 from .typings.motion import (
     MultiChannelMotionData,
@@ -112,7 +113,7 @@ async def async_setup_entry(
         responses = await data_coordinator.client.batch(commands)
         return {
             response["channel"]: response["AiDetectType"]
-            for response in Client.get_ai_config_responses(responses)
+            for response in clientHelpers.ai.get_ai_config_responses(responses)
         }
 
     channel_ai_support = None
@@ -153,9 +154,9 @@ async def async_setup_entry(
 
     if (
         data_coordinator.data.channels is not None
-        and CONF_CHANNELS in config_entry.data
+        and CONF_CHANNELS in config_entry.options
     ):
-        for _c in config_entry.data.get(CONF_CHANNELS, []):
+        for _c in config_entry.options.get(CONF_CHANNELS, []):
             if (
                 not next(
                     (ch for ch in data_coordinator.data.channels if ch["channel"] == _c)
@@ -247,10 +248,10 @@ class MotionDataUpdateCoordinator(DataUpdateCoordinator[dict[int, ChannelMotionS
         if len(self._pending_commands) == 0:
             if (
                 self.coordinator.data.channels is not None
-                and CONF_CHANNELS in self.config_entry.data
+                and CONF_CHANNELS in self.config_entry.options
             ):
                 for _c in cast(
-                    list[int], self.config_entry.data.get(CONF_CHANNELS, [])
+                    list[int], self.config_entry.options.get(CONF_CHANNELS, [])
                 ):
                     if (
                         not next(
@@ -272,16 +273,18 @@ class MotionDataUpdateCoordinator(DataUpdateCoordinator[dict[int, ChannelMotionS
             if need_refresh is None:
                 need_refresh = self.coordinator.async_add_listener(_retry)
             raise
-        if Client.has_auth_failure(responses):
+        if clientHelpers.security.has_auth_failure(responses):
             await self.coordinator.logout()
             if need_refresh is None:
                 need_refresh = self.coordinator.async_add_listener(_retry)
             raise UpdateFailed()
-        ai_states = list(Client.get_ai_state_responses(responses))
+        ai_states = list(clientHelpers.ai.get_ai_state_responses(responses))
         channels = self.data or {}
         for channel, index in self._channel_state_index.items():
             _motion = channels.setdefault(channel, ChannelMotionState())
-            state = next(Client.get_md_state_responses([responses[index]]), None)
+            state = next(
+                clientHelpers.alarm.get_md_state_responses([responses[index]]), None
+            )
             _motion["motion"] = state == 1
             _ai = next(
                 (ai_state for ai_state in ai_states if ai_state["channel"] == channel),

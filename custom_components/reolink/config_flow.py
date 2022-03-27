@@ -18,8 +18,12 @@ from reolinkapi.rest import Client as ReolinkClient
 from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
 from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
 from reolinkapi.typings.abilities import Abilities
-from reolinkapi.typings.abilities.channel import LiveAbilityVers
+from reolinkapi.typings.abilities.channel import (
+    LiveAbilityVers,
+    EncodingTypeAbilityVers,
+)
 from reolinkapi.typings.system import DeviceInfo
+from reolinkapi.helpers.abilities.ability import NO_ABILITY
 from reolinkapi.rest.connection import Encryption
 from reolinkapi.exceptions import ReolinkError
 
@@ -48,9 +52,10 @@ OUTPUT_STREAM_TYPES = {e: e.name for e in OutputStreamTypes}
 class ReolinkBaseConfigFlow:
     """Base Reolink options flow"""
 
-    def __init__(self, data: dict | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self._data = data or {}
+        self._data = {}
+        self._conf_data: dict | None = None
         self._authenticated = False
         self._channels: dict[int, str] = None
         self._abilities: Abilities = None
@@ -63,11 +68,11 @@ class ReolinkBaseConfigFlow:
 
         try:
             client = ReolinkClient()
-
-            hostname = self._data.get(CONF_HOST, "")
-            port = self._data.get(CONF_PORT, DEFAULT_PORT)
-            use_https = self._data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS)
-            _timeout = self._data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+            conf_data = self._conf_data or self._data
+            hostname = conf_data.get(CONF_HOST, "")
+            port = conf_data.get(CONF_PORT, DEFAULT_PORT)
+            use_https = conf_data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS)
+            _timeout = conf_data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
             await client.connect(
                 hostname,
                 port,
@@ -75,8 +80,8 @@ class ReolinkBaseConfigFlow:
                 encryption=Encryption.HTTPS if use_https else Encryption.AES,
             )
 
-            username = self._data.get(CONF_USERNAME, DEFAULT_USERNAME)
-            password = self._data.get(CONF_PASSWORD, DEFAULT_PASSWORD)
+            username = conf_data.get(CONF_USERNAME, DEFAULT_USERNAME)
+            password = conf_data.get(CONF_PASSWORD, DEFAULT_PASSWORD)
             self._authenticated = await client.login(username, password)
             if not self._authenticated:
                 self._auth_id = 0
@@ -88,9 +93,9 @@ class ReolinkBaseConfigFlow:
             ):
                 return
 
-            if CONF_USERNAME not in self._data:
-                self._data[CONF_USERNAME] = username
-                self._data[CONF_PASSWORD] = password
+            if CONF_USERNAME not in conf_data:
+                conf_data[CONF_USERNAME] = username
+                conf_data[CONF_PASSWORD] = password
 
             commands = []
             self._connection_id = client.connection_id
@@ -223,40 +228,43 @@ class ReolinkBaseConfigFlow:
         }
 
     @staticmethod
+    def _options_schema(prior_input: dict):
+        return {
+            vol.Required(
+                CONF_SCAN_INTERVAL,
+                default=prior_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+            ): cv.positive_int,
+            vol.Required(
+                CONF_MOTION_INTERVAL,
+                default=prior_input.get(CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL),
+            ): cv.positive_int,
+        }
+
+    @staticmethod
     def _channel_schema(
         live: LiveAbilityVers,
+        main: EncodingTypeAbilityVers,
         supported_output_types: dict[OutputStreamTypes, str],
         prior_input: dict,
     ) -> dict:
         def _create_schema(stream: CameraStreamTypes):
             _key = f"{stream.name.lower()}_type"
+            out_types = supported_output_types
+            def_type = DEFAULT_STREAM_TYPE[stream]
+            if (
+                stream == CameraStreamTypes.MAIN
+                and main == EncodingTypeAbilityVers.H265
+            ):
+                out_types = supported_output_types.copy()
+                out_types.pop(OutputStreamTypes.RTMP, None)
+            if def_type not in out_types:
+                def_type = next(iter(out_types.keys()))
             return (
-                vol.Required(
-                    _key, default=prior_input.get(_key, DEFAULT_STREAM_TYPE[stream])
-                ),
-                vol.In(supported_output_types),
+                vol.Required(_key, default=prior_input.get(_key, def_type)),
+                vol.In(out_types),
             )
 
-        schema = [
-            (
-                vol.Required(
-                    CONF_SCAN_INTERVAL,
-                    default=prior_input.get(
-                        CONF_SCAN_INTERVAL, DEFAULT_MOTION_INTERVAL
-                    ),
-                ),
-                cv.positive_int,
-            ),
-            (
-                vol.Required(
-                    CONF_MOTION_INTERVAL,
-                    default=prior_input.get(
-                        CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL
-                    ),
-                ),
-                cv.positive_int,
-            ),
-        ]
+        schema = []
 
         if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
             schema.append(_create_schema(CameraStreamTypes.MAIN))
@@ -273,9 +281,6 @@ class ReolinkConfigFlow(
     """Reolink configuration flow"""
 
     VERSION = 1
-
-    def __init__(self) -> None:
-        super().__init__()
 
     async def _update_client_data(self):
         await super()._update_client_data()
@@ -389,10 +394,9 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
     """Reolink options flow"""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        super().__init__(config_entry.data.copy())
-        self._options = (
-            config_entry.options.copy() if config_entry.options is not None else {}
-        )
+        super().__init__()
+        self._data.update(config_entry.options)
+        self._conf_data = config_entry.data.copy()
         self._entry_id = config_entry.entry_id
         self._data_coordinator: EntityDataUpdateCoordinator = None
 
@@ -441,24 +445,24 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
             if choice == "done":
                 return self.async_create_entry(title="", data=self._data)
             if choice == "options":
-                return await self.async_step_options(self._options, {})
+                return await self.async_step_options(self._data, {})
             if choice == "channels":
                 return await self.async_step_channels(self._data, {})
             if choice[0:8] == "channel_":
                 self.context["channel_id"] = int(choice[8:])
-                return await self.async_step_channel(self._options, {})
+                return await self.async_step_channel(self._data, {})
 
-        if self._channels is None:
-            return await self.async_step_options(self._options, {})
+        choices = [("options", "General Settings")]
 
-        choices = [("options", "General Settings"), ("channels", "Select Channels")]
-
-        choices.extend(
-            (
-                (f"channel_{key}", f"Configure ({name})")
-                for key, name in self._channels.items()
+        if self._channels is not None:
+            choices.extend(
+                (
+                    (f"channel_{key}", f"Configure ({name})")
+                    for key, name in self._channels.items()
+                )
             )
-        )
+        else:
+            choices.append(("channel_0", "Configure Streams"))
 
         choices.append(("done", "Save"))
         choices = {_k: _v for _k, _v in choices}
@@ -497,25 +501,23 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
         def _update_type(stream: CameraStreamTypes):
             keys = _key_pair(stream)
-            self._options[keys[1]] = user_input.get(
-                keys[0], DEFAULT_STREAM_TYPE[stream]
-            )
+            self._data[keys[1]] = user_input.get(keys[0], DEFAULT_STREAM_TYPE[stream])
 
         _update_type(CameraStreamTypes.MAIN)
         _update_type(CameraStreamTypes.SUB)
         _update_type(CameraStreamTypes.EXT)
 
-    def _get_channel_options(self, channel_id: int):
+    def _get_channel_options(self, channel_id: int, user_input: dict):
         def _key_pair(stream: CameraStreamTypes):
             user_key = f"{stream.name.lower()}_type"
             return (user_key, f"channel_{channel_id}_{user_key}")
 
-        user_input = {}
+        channel_input = {}
 
         def _update_option(stream: CameraStreamTypes):
             keys = _key_pair(stream)
-            if keys[1] in self._options:
-                user_input[keys[0]] = self._options[keys[1]]
+            if keys[1] in user_input:
+                channel_input[keys[0]] = user_input[keys[1]]
 
         live = self._abilities["abilityChn"][channel_id]["live"]["ver"]
         if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
@@ -524,7 +526,7 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         if live == LiveAbilityVers.MAIN_EXTERN_SUB:
             _update_option(CameraStreamTypes.EXT)
 
-        return user_input
+        return channel_input
 
     def _get_output_streams(self):
         output_types: list[OutputStreamTypes] = []
@@ -546,10 +548,14 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
             self.context.pop("channel_id", None)
             return await self._setup_entry()
 
-        if user_input is None:
-            user_input = self._get_channel_options(channel_id)
+        user_input = self._get_channel_options(channel_id, user_input or self._data)
         output_types = self._get_output_streams()
         live = self._abilities["abilityChn"][channel_id]["live"]["ver"]
+        main = (
+            self._abilities["abilityChn"][channel_id]
+            .get("mainEncType", NO_ABILITY)
+            .get("ver", EncodingTypeAbilityVers.H264)
+        )
 
         name = self._channels[channel_id] if self._channels is not None else "Stream"
 
@@ -557,7 +563,9 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
             step_id="channel",
             description_placeholders={"name": self._devinfo["name"], "channel": name},
             data_schema=vol.Schema(
-                ReolinkBaseConfigFlow._channel_schema(live, output_types, user_input)
+                ReolinkBaseConfigFlow._channel_schema(
+                    live, main, output_types, user_input
+                )
             ),
             errors=errors,
         )
@@ -568,25 +576,12 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         """ "General Options"""
 
         if user_input is not None and errors is None:
-            if self._channels is None:
-                self._update_channel_options(0, user_input)
-                return self.async_create_entry(title="", data=self._options)
-
+            self._data.update(user_input)
             return await self._setup_entry()
-
-        schema = {}
-        if self._channels is None:
-            if user_input is None:
-                user_input = self._get_channel_options(0)
-            output_types = self._get_output_streams()
-            live = self._abilities["abilityChn"][0]["live"]["ver"]
-            schema.update(
-                ReolinkBaseConfigFlow._channel_schema(live, output_types, user_input)
-            )
 
         return self.async_show_form(
             step_id="options",
             description_placeholders={"name": self._devinfo["name"]},
-            data_schema=vol.Schema(schema),
+            data_schema=vol.Schema(ReolinkBaseConfigFlow._options_schema(user_input)),
             errors=errors,
         )

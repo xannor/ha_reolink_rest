@@ -1,10 +1,9 @@
 """Constants"""
 from __future__ import annotations
-from datetime import timedelta
 
 from enum import IntEnum
 from typing import Final
-from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
+from reolinkapi.const import StreamTypes as CameraStreamTypes
 from reolinkapi.models.ai import AITypes
 from homeassistant.components.camera import CameraEntityDescription
 from homeassistant.components.binary_sensor import (
