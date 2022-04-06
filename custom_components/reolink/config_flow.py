@@ -16,7 +16,7 @@ from homeassistant.const import (
 import voluptuous as vol
 from reolinkapi.rest import Client as ReolinkClient
 from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
-from reolinkapi.rest.const import StreamTypes as CameraStreamTypes
+from reolinkapi.const import StreamTypes as CameraStreamTypes
 from reolinkapi.typings.abilities import Abilities
 from reolinkapi.typings.abilities.channel import (
     LiveAbilityVers,
@@ -26,6 +26,8 @@ from reolinkapi.typings.system import DeviceInfo
 from reolinkapi.helpers.abilities.ability import NO_ABILITY
 from reolinkapi.rest.connection import Encryption
 from reolinkapi.exceptions import ReolinkError
+from reolinkapi import helpers as clientHelpers
+
 
 from .entity import EntityDataUpdateCoordinator
 from .const import (
@@ -103,32 +105,36 @@ class ReolinkBaseConfigFlow:
             if self._auth_id != client.authentication_id:
                 abil = self._abilities = await client.get_ability()
             else:
-                commands.append(ReolinkClient.create_get_ability())
+                commands.append(clientHelpers.system.create_get_ability())
 
             if self._abilities is None:
                 return
             self._auth_id = client.authentication_id
 
             if self._abilities["p2p"]["ver"]:
-                commands.append(ReolinkClient.create_get_p2p())
+                commands.append(clientHelpers.network.create_get_p2p())
 
             if self._abilities["localLink"]["ver"]:
-                commands.append(ReolinkClient.create_get_local_link())
+                commands.append(clientHelpers.network.create_get_local_link())
 
             if self._abilities["devInfo"]["ver"]:
-                commands.append(ReolinkClient.create_get_device_info())
+                commands.append(clientHelpers.system.create_get_device_info())
             if self._devinfo is not None and self._devinfo["channelNum"] > 1:
-                commands.append(ReolinkClient.create_get_channel_status())
+                commands.append(clientHelpers.network.create_get_channel_status())
 
             responses = await client.batch(commands)
-            self._abilities = next(ReolinkClient.get_ability_responses(responses), abil)
+            self._abilities = next(
+                clientHelpers.system.get_ability_responses(responses), abil
+            )
 
             if self._abilities is None:
                 return
-            p2p = next(ReolinkClient.get_p2p_responses(responses), None)
-            link = next(ReolinkClient.get_local_link_responses(responses), None)
-            self._devinfo = next(ReolinkClient.get_device_info_responses(responses))
-            channels = next(ReolinkClient.get_channel_status_responses(responses), None)
+            p2p = next(clientHelpers.network.get_p2p_responses(responses), None)
+            link = next(clientHelpers.network.get_local_link_responses(responses), None)
+            self._devinfo = next(clientHelpers.system.get_devinfo_responses(responses))
+            channels = next(
+                clientHelpers.network.get_channel_status_responses(responses), None
+            )
             if (
                 self._devinfo is not None
                 and self._devinfo["channelNum"] > 1
