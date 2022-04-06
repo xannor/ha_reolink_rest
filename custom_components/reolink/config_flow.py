@@ -34,6 +34,7 @@ from .const import (
     CONF_CHANNELS,
     CONF_MOTION_INTERVAL,
     CONF_PREFIX_CHANNEL,
+    CONF_USE_AES,
     CONF_USE_HTTPS,
     DATA_COORDINATOR,
     DEFAULT_MOTION_INTERVAL,
@@ -41,6 +42,7 @@ from .const import (
     DEFAULT_PREFIX_CHANNEL,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STREAM_TYPE,
+    DEFAULT_USE_AES,
     DEFAULT_USE_HTTPS,
     DOMAIN,
     OutputStreamTypes,
@@ -73,13 +75,17 @@ class ReolinkBaseConfigFlow:
             conf_data = self._conf_data or self._data
             hostname = conf_data.get(CONF_HOST, "")
             port = conf_data.get(CONF_PORT, DEFAULT_PORT)
-            use_https = conf_data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS)
             _timeout = conf_data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+            encryption = Encryption.NONE
+            if conf_data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS):
+                encryption = Encryption.HTTPS
+            elif self._data.get(CONF_USE_AES, DEFAULT_USE_AES):
+                encryption = Encryption.AES
             await client.connect(
                 hostname,
                 port,
                 _timeout,
-                encryption=Encryption.HTTPS if use_https else Encryption.AES,
+                encryption=encryption,
             )
 
             username = conf_data.get(CONF_USERNAME, DEFAULT_USERNAME)
