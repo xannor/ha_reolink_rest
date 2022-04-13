@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from reolinkapi.rest.ai import GetAiStateResponseValue
+from reolinkapi.helpers.ai import GetAiStateResponseValue
 
 
 class SimpleMotionData(TypedDict):

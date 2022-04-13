@@ -19,7 +19,6 @@ from homeassistant.helpers.update_coordinator import (
     Debouncer,
 )
 
-from reolinkapi.rest import Client
 from reolinkapi.typings.abilities.channel import ChannelAbilities
 from reolinkapi.typings.ai import AiAlarmState
 from reolinkapi.models.ai import AITypes
@@ -77,12 +76,26 @@ async def async_setup_entry(
     entry_data: dict = domain_data[config_entry.entry_id]
     data_coordinator: EntityDataUpdateCoordinator = entry_data[DATA_COORDINATOR]
 
+    services = {}
+    if data_coordinator.data.abilities["onvif"]["ver"]:
+        services["onvif"] = await addons.async_find_service_providers(
+            hass, "reolink_onvif"
+        )
+    if data_coordinator.data.abilities["email"]["ver"]:
+        services["email"] = await addons.async_find_service_providers(
+            hass, "reolink_email"
+        )
+
     update_coordinator: MotionDataUpdateCoordinator = entry_data.get(
         DATA_MOTION_COORDINATOR, None
     )
     if update_coordinator is None:
         update_interval = get_poll_interval(config_entry)
         if update_interval.seconds < 2:
+            update_interval = None
+        # if we have viable methods other than timed polling we will not poll
+        # TODO : detect late registration of services
+        if len([item for items in services.items() for item in items]) > 0:
             update_interval = None
         update_coordinator = MotionDataUpdateCoordinator(
             data_coordinator,
