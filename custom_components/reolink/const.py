@@ -55,15 +55,14 @@ CAMERA_TYPES: Final[dict[CameraStreamTypes, CameraEntityDescription]] = {
     ),
 }
 
-DATA_COORDINATOR = "coordinator"
-DATA_MOTION_COORDINATOR = "motion_coordinator"
+EVENT_REOLINK_MOTION_ADDON = "reolink_motion_addon"
 
 
-class _AI_Type_None:
+class _AITypeNone:
     pass
 
 
-AI_TYPE_NONE = _AI_Type_None
+AI_TYPE_NONE = _AITypeNone
 
 MOTION_TYPE: Final[dict[AITypes | AI_TYPE_NONE, BinarySensorEntityDescription]] = {
     AI_TYPE_NONE: BinarySensorEntityDescription(

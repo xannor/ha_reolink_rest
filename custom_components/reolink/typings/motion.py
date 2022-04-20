@@ -23,3 +23,9 @@ class MultiChannelMotionData(TypedDict):
     """Multi-channel motion data"""
 
     channels: list[SimpleChannelMotionData | GetAiStateResponseValue]
+
+
+class ChannelMotionState(GetAiStateResponseValue, total=False):
+    """Motion State Data"""
+
+    motion: bool

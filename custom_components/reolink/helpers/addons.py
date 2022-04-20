@@ -1,15 +1,48 @@
 """Addon Helpers"""
+from __future__ import annotations
 
-from homeassistant.components import hassio
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.components.hassio.const import (
+    SupervisorEntityModel,
+    DOMAIN as HASSIO_DOMAIN,
+)
+from homeassistant.core import HomeAssistant, Event
+from homeassistant.helpers.singleton import singleton
+from homeassistant.helpers import device_registry as dr
+from homeassistant.loader import bind_hass
+
+from ..const import DATA_MOTION_ADDONS, DOMAIN, EVENT_REOLINK_MOTION_ADDON
 
 
-async def async_find_service_providers(hass: HomeAssistant, service: str):
-    """Return a list of addons that provide a service"""
+@singleton
+@bind_hass
+def async_get_addon_tracker(hass: HomeAssistant):
+    """setup the event monitor and do inital addon scan"""
 
-    _hassio: hassio.handler.HassIO = hass.data.get(hassio.const.DOMAIN, None)
-    if _hassio is None:
-        return []
-    discovered = await _hassio.retrieve_discovery_messages()
+    if not hass.components.hassio.is_hassio():
+        return None
 
-    return []
+    domain_data: dict = hass.data[DOMAIN]
+    tracker_data: dict = domain_data.setdefault(DATA_MOTION_ADDONS, {})
+
+    def handle_shutdown(event: Event):
+        pass
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, handle_shutdown)
+
+    async def scan_addons():
+        dev_reg = await dr.async_get_registry(hass)
+        for entry in (
+            entry
+            for entry in dev_reg.devices.values()
+            if entry.model == SupervisorEntityModel.ADDON
+            and entry.entry_type == dr.DeviceEntryType.SERVICE
+        ):
+            slug = next((slug for d, slug in entry.identifiers if d == HASSIO_DOMAIN))
+            if slug is None:
+                continue
+            addon_info: dict = await hass.components.hassio.async_get_addon_info(slug)
+            if not "reolink_motion:provide" in addon_info.get("services_role", []):
+                continue
+
+    return hass.async_add_job(scan_addons)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from asyncio import Task
 
 import logging
+from typing import cast
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -18,13 +19,14 @@ from reolinkapi.typings.abilities.channel import (
 )
 from reolinkapi.helpers.abilities.ability import NO_ABILITY, NO_CHANNEL_ABILITIES
 
+from .typings import component
 
-from .entity import EntityDataUpdateCoordinator, ReolinkEntity
+
+from .entity import ReolinkEntity
 
 from .const import (
     CONF_CHANNELS,
     CONF_PREFIX_CHANNEL,
-    DATA_COORDINATOR,
     DEFAULT_STREAM_TYPE,
     DOMAIN,
     CAMERA_TYPES,
@@ -41,9 +43,9 @@ async def async_setup_entry(
 ):
     """Setup camera platform"""
 
-    domain_data: dict = hass.data[DOMAIN]
-    entry_data: dict = domain_data[config_entry.entry_id]
-    data_coordinator: EntityDataUpdateCoordinator = entry_data[DATA_COORDINATOR]
+    domain_data = cast(component.HassDomainData, hass.data)[DOMAIN]
+    entry_data = domain_data[config_entry.entry_id]
+    data_coordinator = entry_data.coordinator
 
     entities = []
 
@@ -172,11 +174,11 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
     async def stream_source(self):
         if self._stream_url is None:
             if self._output_type == OutputStreamTypes.RTSP:
-                self._stream_url = await self.coordinator.client.get_rtsp_url(
+                self._stream_url = await self._client.get_rtsp_url(
                     self._channel_id, self._stream_type
                 )
             elif self._output_type == OutputStreamTypes.RTMP:
-                self._stream_url = await self.coordinator.client.get_rtmp_url(
+                self._stream_url = await self._client.get_rtmp_url(
                     self._channel_id, self._stream_type
                 )
 
@@ -199,7 +201,7 @@ class ReolinkCameraEntity(ReolinkEntity, Camera):
         # "linearly" and multiple calls will return the
         # same pending picture
         self._snapshot_task = self.hass.async_create_task(
-            self.coordinator.client.get_snap(self._channel_id)
+            self._client.get_snap(self._channel_id)
         )
         snap = None
         try:
