@@ -1,5 +1,6 @@
 """Addon Helpers"""
 from __future__ import annotations
+from typing import cast
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.components.hassio.const import (
@@ -11,10 +12,11 @@ from homeassistant.helpers.singleton import singleton
 from homeassistant.helpers import device_registry as dr
 from homeassistant.loader import bind_hass
 
-from ..const import DATA_MOTION_ADDONS, DOMAIN, EVENT_REOLINK_MOTION_ADDON
+from ..const import DOMAIN
+from ..typings.component import HassDomainData
 
 
-@singleton
+@singleton(f"{DOMAIN}-tracked-addons")
 @bind_hass
 def async_get_addon_tracker(hass: HomeAssistant):
     """setup the event monitor and do inital addon scan"""
@@ -22,8 +24,8 @@ def async_get_addon_tracker(hass: HomeAssistant):
     if not hass.components.hassio.is_hassio():
         return None
 
-    domain_data: dict = hass.data[DOMAIN]
-    tracker_data: dict = domain_data.setdefault(DATA_MOTION_ADDONS, {})
+    domain_data = cast(HassDomainData, hass.data)[DOMAIN]
+    # tracker_data: dict = domain_data.setdefault(DATA_MOTION_ADDONS, {})
 
     def handle_shutdown(event: Event):
         pass

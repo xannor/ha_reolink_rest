@@ -58,13 +58,11 @@ PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR]
 def _create_async_update_entity_data(
     config_entry: ConfigEntry, client: Client, device_registry: dr.DeviceRegistry
 ):
-    abilities: ra.Abilities = None
-    client_device_info: rs.DeviceInfo = None
-    device_info: DeviceInfo = None
+    entity_data: EntityData = None
     device_id: str = None
 
     async def async_update_data() -> EntityData:
-        nonlocal abilities, client_device_info, device_info, device_id
+        nonlocal entity_data, device_id
 
         if not client.authenticated:
             if not await client.login(
@@ -75,7 +73,7 @@ def _create_async_update_entity_data(
                 raise ConfigEntryAuthFailed()
 
         commands = []
-        if abilities is None:
+        if entity_data is None:
             abilities = await client.get_ability(config_entry.data.get(CONF_USERNAME))
             if client.authentication_required:
                 await client.disconnect()
@@ -83,6 +81,7 @@ def _create_async_update_entity_data(
             if abilities is None:
                 raise ConfigEntryNotReady()
         else:
+            abilities = entity_data.abilities
             commands.append(clientHelpers.system.create_get_ability())
 
         commands.append(clientHelpers.network.create_get_network_ports())
@@ -96,8 +95,8 @@ def _create_async_update_entity_data(
         if abilities.get("devInfo", NO_ABILITY)["ver"]:
             commands.append(clientHelpers.system.create_get_device_info())
             if (
-                client_device_info is not None
-                and client_device_info.get("channelNum", 0) > 1
+                entity_data is not None
+                and entity_data.client_device_info.get("channelNum", 0) > 1
             ):
                 commands.append(clientHelpers.network.create_get_channel_status())
 
@@ -119,7 +118,7 @@ def _create_async_update_entity_data(
         link = next(clientHelpers.network.get_local_link_responses(responses), None)
         client_device_info = next(
             clientHelpers.system.get_devinfo_responses(responses),
-            client_device_info,
+            entity_data.client_device_info if entity_data is not None else None,
         )
         _channels = next(
             clientHelpers.network.get_channel_status_responses(responses), None
@@ -164,10 +163,12 @@ def _create_async_update_entity_data(
             device_id = device.id
             device_info = DeviceInfo(astypeddict(device, DeviceInfo))
         else:
+            uid = entity_data.uid
+            device_info = entity_data.device_info
             device_info.update(
                 astypeddict(
                     device_registry.async_update_device(
-                        device.id,
+                        device_id,
                         name=client_device_info["name"],
                         configuration_url=client.base_url,
                     ),
@@ -175,7 +176,7 @@ def _create_async_update_entity_data(
                 )
             )
 
-        return EntityData(
+        entity_data = EntityData(
             client.connection_id,
             uid if uid is not None else link["mac"] if link is not None else "",
             abilities,
@@ -184,6 +185,7 @@ def _create_async_update_entity_data(
             client_device_info,
             device_info,
         )
+        return entity_data
 
     return async_update_data
 
@@ -246,7 +248,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         _LOGGER,
         name=f"{DOMAIN}-common-data",
         update_interval=get_poll_interval(config_entry),
-        update_method=_create_async_update_entity_data(hass, config_entry, client),
+        update_method=_create_async_update_entity_data(
+            config_entry, client, dr.async_get(hass)
+        ),
     )
 
     await update_coordinator.async_config_entry_first_refresh()

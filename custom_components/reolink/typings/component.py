@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Mapping, MutableMapping, overload
 
 from homeassistant.helpers.entity import DeviceInfo
@@ -35,7 +35,9 @@ class EntryData:
 
     client: Client
     coordinator: DataUpdateCoordinator[EntityData]
-    data_motion_coordinator: DataUpdateCoordinator[dict[int, ChannelMotionState]]
+    data_motion_coordinator: DataUpdateCoordinator[
+        dict[int, ChannelMotionState]
+    ] = field(default=None, init=False)
 
 
 @dataclass

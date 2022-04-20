@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import cast
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
@@ -29,14 +30,12 @@ from reolinkapi.exceptions import ReolinkError
 from reolinkapi import helpers as clientHelpers
 
 
-from .entity import EntityDataUpdateCoordinator
 from .const import (
     CONF_CHANNELS,
     CONF_MOTION_INTERVAL,
     CONF_PREFIX_CHANNEL,
     CONF_USE_AES,
     CONF_USE_HTTPS,
-    DATA_COORDINATOR,
     DEFAULT_MOTION_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_PREFIX_CHANNEL,
@@ -47,6 +46,7 @@ from .const import (
     DOMAIN,
     OutputStreamTypes,
 )
+from .typings import component
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -410,33 +410,30 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         self._data.update(config_entry.options)
         self._conf_data = config_entry.data.copy()
         self._entry_id = config_entry.entry_id
-        self._data_coordinator: EntityDataUpdateCoordinator = None
+        self._entry_data: component.EntryData = None
 
     async def _update_client_data(self):
-        if self._data_coordinator is None and self._connection_id == 0:
-            domain_data = self.hass.data[DOMAIN]
-            entry_data = domain_data[self._entry_id]
-            self._data_coordinator: EntityDataUpdateCoordinator = entry_data[
-                DATA_COORDINATOR
-            ]
-            self._connection_id = self._data_coordinator.client.connection_id
-            self._auth_id = self._data_coordinator.client.authentication_id
-            self._authenticated = True
+        if self._entry_data is None and self._connection_id == 0:
+            domain_data = cast(component.HassDomainData, self.hass.data)[DOMAIN]
+            self._entry_data = domain_data[self._entry_id]
+            self._connection_id = self._entry_data.client.connection_id
+            self._auth_id = self._entry_data.client.authentication_id
+            self._authenticated = self._entry_data.client.authenticated
 
         if (
-            self._data_coordinator.client.connection_id != self._connection_id
-            or self._data_coordinator.client.authentication_id != self._auth_id
+            self._entry_data.client.connection_id != self._connection_id
+            or self._entry_data.client.authentication_id != self._auth_id
         ):
             return await super()._update_client_data()
 
-        self._abilities = self._data_coordinator.data.abilities
-        self._devinfo = self._data_coordinator.data.client_device_info
+        self._abilities = self._entry_data.coordinator.data.abilities
+        self._devinfo = self._entry_data.coordinator.data.client_device_info
         self._channels = (
             {
                 channel["channel"]: channel["name"]
-                for channel in self._data_coordinator.data.channels
+                for channel in self._entry_data.coordinator.data.channels
             }
-            if self._data_coordinator.data.channels is not None
+            if self._entry_data.coordinator.data.channels is not None
             else None
         )
 
