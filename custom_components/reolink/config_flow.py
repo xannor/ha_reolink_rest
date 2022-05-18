@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from typing import cast
+from urllib.parse import urlparse
 from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.helpers import config_validation as cv
@@ -126,7 +127,8 @@ class ReolinkBaseConfigFlow:
             if self._abilities["devInfo"]["ver"]:
                 commands.append(clientHelpers.system.create_get_device_info())
             if self._devinfo is not None and self._devinfo["channelNum"] > 1:
-                commands.append(clientHelpers.network.create_get_channel_status())
+                commands.append(
+                    clientHelpers.network.create_get_channel_status())
 
             responses = await client.batch(commands)
             self._abilities = next(
@@ -136,10 +138,13 @@ class ReolinkBaseConfigFlow:
             if self._abilities is None:
                 return
             p2p = next(clientHelpers.network.get_p2p_responses(responses), None)
-            link = next(clientHelpers.network.get_local_link_responses(responses), None)
-            self._devinfo = next(clientHelpers.system.get_devinfo_responses(responses))
+            link = next(
+                clientHelpers.network.get_local_link_responses(responses), None)
+            self._devinfo = next(
+                clientHelpers.system.get_devinfo_responses(responses))
             channels = next(
-                clientHelpers.network.get_channel_status_responses(responses), None
+                clientHelpers.network.get_channel_status_responses(
+                    responses), None
             )
             if (
                 self._devinfo is not None
@@ -168,123 +173,123 @@ class ReolinkBaseConfigFlow:
         finally:
             await client.disconnect()
 
-    @staticmethod
-    def _normalize_host(user_input: dict):
-        hostname: str = user_input.get(CONF_HOST)
-        port: int = user_input.get(CONF_PORT)
-        idx = hostname.find("://")
-        if idx > -1:
-            schema = hostname[0:idx].lower()
-            hostname = hostname[idx + 3 :]
-            idx = hostname.find(":")
-            if idx > -1:
-                _port = hostname[idx + 1 :]
-                hostname = hostname[0:idx]
-                idx = _port.find("/")
-                if idx > -1:
-                    _port = _port[0:idx]
-                port = int(_port)
-            if schema == "https" or port == 443:
-                user_input[CONF_USE_HTTPS] = True
-                if port is None or port == 443:
-                    port = None
-            elif schema == "http" or port == 80:
-                user_input[CONF_USE_HTTPS] = False
-                if port is None or port == 80:
-                    port = None
-            user_input[CONF_HOST] = hostname
-            user_input[CONF_PORT] = port or None
 
-    @staticmethod
-    def _connect_schema(prior_input: dict) -> dict:
-        return {
-            vol.Required(CONF_HOST, default=prior_input.get(CONF_HOST)): str,
-            vol.Optional(
-                CONF_PORT,
-                description={
-                    "suggested_value": prior_input.get(CONF_PORT, DEFAULT_PORT)
-                },
-            ): cv.port,
-            vol.Required(
-                CONF_USE_HTTPS,
-                default=prior_input.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS),
-            ): bool,
-        }
+def _normalize_host(user_input: dict):
+    hostname: str = user_input.get(CONF_HOST)
+    port: int = user_input.get(CONF_PORT)
+    parsed = urlparse(hostname)
+    if parsed.scheme != "":
+        scheme = parsed.scheme
+        hostname = parsed.hostname
+        port = parsed.port
+        if parsed.username:
+            user_input[CONF_USERNAME] = parsed.username
+        if parsed.password:
+            user_input[CONF_PASSWORD] = parsed.password
+        if scheme == "https" or port == 443:
+            user_input[CONF_USE_HTTPS] = True
+        elif scheme == "http" or port == 80:
+            user_input[CONF_USE_HTTPS] = False
+    if user_input.get(CONF_USE_HTTPS):
+        if port == 443:
+            port = None
+    elif port == 80:
+        port = None
+    user_input[CONF_HOST] = hostname
+    user_input[CONF_PORT] = port
 
-    @staticmethod
-    def _login_schema(prior_input: dict) -> dict:
-        return {
-            vol.Required(
-                CONF_USERNAME,
-                default=prior_input.get(CONF_USERNAME, DEFAULT_USERNAME),
-            ): str,
-            vol.Optional(
-                CONF_PASSWORD,
-                description={
-                    "suggested_value": prior_input.get(CONF_PASSWORD, DEFAULT_PASSWORD)
-                },
-            ): str,
-        }
 
-    @staticmethod
-    def _channels_schema(prior_input: dict, channels: dict) -> dict:
-        return {
-            vol.Required(
-                CONF_PREFIX_CHANNEL,
-                default=prior_input.get(CONF_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
-            ): bool,
-            vol.Required(
-                CONF_CHANNELS,
-                default=prior_input.get(CONF_CHANNELS, set(channels.keys())),
-            ): cv.multi_select(channels),
-        }
+def _connect_schema(prior_input: dict) -> dict:
+    return {
+        vol.Required(CONF_HOST, default=prior_input.get(CONF_HOST)): str,
+        vol.Optional(
+            CONF_PORT,
+            description={
+                "suggested_value": prior_input.get(CONF_PORT, DEFAULT_PORT)
+            },
+        ): cv.port,
+        vol.Required(
+            CONF_USE_HTTPS,
+            default=prior_input.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS),
+        ): bool,
+    }
 
-    @staticmethod
-    def _options_schema(prior_input: dict):
-        return {
-            vol.Required(
-                CONF_SCAN_INTERVAL,
-                default=prior_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
-            ): cv.positive_int,
-            vol.Required(
-                CONF_MOTION_INTERVAL,
-                default=prior_input.get(CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL),
-            ): cv.positive_int,
-        }
 
-    @staticmethod
-    def _channel_schema(
-        live: LiveAbilityVers,
-        main: EncodingTypeAbilityVers,
-        supported_output_types: dict[OutputStreamTypes, str],
-        prior_input: dict,
-    ) -> dict:
-        def _create_schema(stream: CameraStreamTypes):
-            _key = f"{stream.name.lower()}_type"
-            out_types = supported_output_types
-            def_type = DEFAULT_STREAM_TYPE[stream]
-            if (
-                stream == CameraStreamTypes.MAIN
-                and main == EncodingTypeAbilityVers.H265
-            ):
-                out_types = supported_output_types.copy()
-                out_types.pop(OutputStreamTypes.RTMP, None)
-            if def_type not in out_types:
-                def_type = next(iter(out_types.keys()))
-            return (
-                vol.Required(_key, default=prior_input.get(_key, def_type)),
-                vol.In(out_types),
-            )
+def _login_schema(prior_input: dict) -> dict:
+    return {
+        vol.Required(
+            CONF_USERNAME,
+            default=prior_input.get(CONF_USERNAME, DEFAULT_USERNAME),
+        ): str,
+        vol.Optional(
+            CONF_PASSWORD,
+            description={
+                "suggested_value": prior_input.get(CONF_PASSWORD, DEFAULT_PASSWORD)
+            },
+        ): str,
+    }
 
-        schema = []
 
-        if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
-            schema.append(_create_schema(CameraStreamTypes.MAIN))
-            schema.append(_create_schema(CameraStreamTypes.SUB))
-        if live == LiveAbilityVers.MAIN_EXTERN_SUB:
-            schema.append(_create_schema(CameraStreamTypes.EXT))
+def _channels_schema(prior_input: dict, channels: dict) -> dict:
+    return {
+        vol.Required(
+            CONF_PREFIX_CHANNEL,
+            default=prior_input.get(
+                CONF_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
+        ): bool,
+        vol.Required(
+            CONF_CHANNELS,
+            default=prior_input.get(CONF_CHANNELS, set(channels.keys())),
+        ): cv.multi_select(channels),
+    }
 
-        return {_k: _v for _k, _v in schema}
+
+def _options_schema(prior_input: dict):
+    return {
+        vol.Required(
+            CONF_SCAN_INTERVAL,
+            default=prior_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+        ): cv.positive_int,
+        vol.Required(
+            CONF_MOTION_INTERVAL,
+            default=prior_input.get(
+                CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL),
+        ): cv.positive_int,
+    }
+
+
+def _channel_schema(
+    live: LiveAbilityVers,
+    main: EncodingTypeAbilityVers,
+    supported_output_types: dict[OutputStreamTypes, str],
+    prior_input: dict,
+) -> dict:
+    def _create_schema(stream: CameraStreamTypes):
+        _key = f"{stream.name.lower()}_type"
+        out_types = supported_output_types
+        def_type = DEFAULT_STREAM_TYPE[stream]
+        if (
+            stream == CameraStreamTypes.MAIN
+            and main == EncodingTypeAbilityVers.H265
+        ):
+            out_types = supported_output_types.copy()
+            out_types.pop(OutputStreamTypes.RTMP, None)
+        if def_type not in out_types:
+            def_type = next(iter(out_types.keys()))
+        return (
+            vol.Required(_key, default=prior_input.get(_key, def_type)),
+            vol.In(out_types),
+        )
+
+    schema = []
+
+    if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
+        schema.append(_create_schema(CameraStreamTypes.MAIN))
+        schema.append(_create_schema(CameraStreamTypes.SUB))
+    if live == LiveAbilityVers.MAIN_EXTERN_SUB:
+        schema.append(_create_schema(CameraStreamTypes.EXT))
+
+    return {_k: _v for _k, _v in schema}
 
 
 class ReolinkConfigFlow(
@@ -297,7 +302,8 @@ class ReolinkConfigFlow(
     async def _update_client_data(self):
         await super()._update_client_data()
         if self._devinfo is not None:
-            placeholders: dict = self.context.setdefault("title_placeholders", {})
+            placeholders: dict = self.context.setdefault(
+                "title_placeholders", {})
             placeholders["name"] = self._devinfo["name"]
             placeholders["type"] = self._devinfo["type"]
 
@@ -337,7 +343,7 @@ class ReolinkConfigFlow(
         if user_input is not None and errors is None:
             hostname: str | None = user_input.get(CONF_HOST)
             if hostname is not None:
-                ReolinkBaseConfigFlow._normalize_host(user_input)
+                _normalize_host(user_input)
 
                 self._data.update(user_input)
                 return await self._setup_entry()
@@ -346,7 +352,7 @@ class ReolinkConfigFlow(
             step_id="connect",
             description_placeholders={CONF_PORT: "Default"},
             data_schema=vol.Schema(
-                ReolinkBaseConfigFlow._connect_schema(user_input or {})
+                _connect_schema(user_input or self._data or {})
             ),
             errors=errors,
         )
@@ -363,7 +369,7 @@ class ReolinkConfigFlow(
         return self.async_show_form(
             step_id="login",
             data_schema=vol.Schema(
-                ReolinkBaseConfigFlow._login_schema(user_input or {})
+                _login_schema(user_input or {})
             ),
             errors=errors,
         )
@@ -383,7 +389,7 @@ class ReolinkConfigFlow(
                 "name": self._devinfo["name"],
             },
             data_schema=vol.Schema(
-                ReolinkBaseConfigFlow._channels_schema(user_input or {}, self._channels)
+                _channels_schema(user_input or {}, self._channels)
             ),
             errors=errors,
         )
@@ -414,7 +420,8 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
     async def _update_client_data(self):
         if self._entry_data is None and self._connection_id == 0:
-            domain_data = cast(component.HassDomainData, self.hass.data)[DOMAIN]
+            domain_data = cast(component.HassDomainData,
+                               self.hass.data)[DOMAIN]
             self._entry_data = domain_data[self._entry_id]
             self._connection_id = self._entry_data.client.connection_id
             self._auth_id = self._entry_data.client.authentication_id
@@ -479,7 +486,8 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="menu",
             data_schema=vol.Schema(
-                {vol.Required(CONF_MENU_CHOICE, default="done"): vol.In(choices)}
+                {vol.Required(CONF_MENU_CHOICE, default="done")
+                              : vol.In(choices)}
             ),
         )
 
@@ -498,7 +506,7 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
                 "name": self._devinfo["name"],
             },
             data_schema=vol.Schema(
-                ReolinkBaseConfigFlow._channels_schema(user_input or {}, self._channels)
+                _channels_schema(user_input or {}, self._channels)
             ),
             errors=errors,
         )
@@ -510,7 +518,8 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
         def _update_type(stream: CameraStreamTypes):
             keys = _key_pair(stream)
-            self._data[keys[1]] = user_input.get(keys[0], DEFAULT_STREAM_TYPE[stream])
+            self._data[keys[1]] = user_input.get(
+                keys[0], DEFAULT_STREAM_TYPE[stream])
 
         _update_type(CameraStreamTypes.MAIN)
         _update_type(CameraStreamTypes.SUB)
@@ -557,7 +566,8 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
             self.context.pop("channel_id", None)
             return await self._setup_entry()
 
-        user_input = self._get_channel_options(channel_id, user_input or self._data)
+        user_input = self._get_channel_options(
+            channel_id, user_input or self._data)
         output_types = self._get_output_streams()
         live = self._abilities["abilityChn"][channel_id]["live"]["ver"]
         main = (
@@ -570,9 +580,10 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="channel",
-            description_placeholders={"name": self._devinfo["name"], "channel": name},
+            description_placeholders={
+                "name": self._devinfo["name"], "channel": name},
             data_schema=vol.Schema(
-                ReolinkBaseConfigFlow._channel_schema(
+                _channel_schema(
                     live, main, output_types, user_input
                 )
             ),
@@ -591,6 +602,6 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="options",
             description_placeholders={"name": self._devinfo["name"]},
-            data_schema=vol.Schema(ReolinkBaseConfigFlow._options_schema(user_input)),
+            data_schema=vol.Schema(_options_schema(user_input)),
             errors=errors,
         )

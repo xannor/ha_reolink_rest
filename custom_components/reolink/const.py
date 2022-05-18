@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Final
+from typing import Final, Literal
 from reolinkapi.const import StreamTypes as CameraStreamTypes
 from reolinkapi.models.ai import AITypes
 from homeassistant.components.camera import CameraEntityDescription
@@ -55,7 +55,11 @@ CAMERA_TYPES: Final[dict[CameraStreamTypes, CameraEntityDescription]] = {
     ),
 }
 
-EVENT_REOLINK_MOTION_ADDON = "reolink_motion_addon"
+ONVIF_SERVICE = "onvif"
+ONVIF_SERVICE_TYPE = Literal["onvif"]
+
+EMAIL_SERVICE = "email"
+EMAIL_SERVICE_TYPE = Literal["email"]
 
 
 class _AITypeNone:

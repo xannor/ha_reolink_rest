@@ -29,15 +29,17 @@ class EntityData:
     device_info: DeviceInfo
 
 
+MotionData = dict[int, ChannelMotionState]
+
+
 @dataclass
 class EntryData:
     """Entry Data"""
 
     client: Client
     coordinator: DataUpdateCoordinator[EntityData]
-    data_motion_coordinator: DataUpdateCoordinator[
-        dict[int, ChannelMotionState]
-    ] = field(default=None, init=False)
+    motion_coordinator: DataUpdateCoordinator[MotionData] = field(
+        default=None, init=False)
 
 
 @dataclass

@@ -6,6 +6,7 @@ from datetime import timedelta
 import logging
 from typing import cast
 import aiohttp
+import async_timeout
 
 from homeassistant.const import (
     CONF_HOST,
@@ -20,10 +21,11 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
-from homeassistant.helpers.aiohttp_client import async_create_clientsession
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceRegistry, CONNECTION_NETWORK_MAC
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
 from reolinkapi.rest import Client
 from reolinkapi.rest.connection import Encryption
@@ -31,8 +33,6 @@ from reolinkapi.const import DEFAULT_TIMEOUT
 from reolinkapi.typings import system as rs, abilities as ra
 from reolinkapi.helpers.abilities.ability import NO_ABILITY
 from reolinkapi import helpers as clientHelpers
-
-import async_timeout
 
 from .utility import astypeddict
 
@@ -56,7 +56,7 @@ PLATFORMS = [Platform.CAMERA, Platform.BINARY_SENSOR]
 
 
 def _create_async_update_entity_data(
-    config_entry: ConfigEntry, client: Client, device_registry: dr.DeviceRegistry
+    config_entry: ConfigEntry, client: Client, device_registry: DeviceRegistry
 ):
     entity_data: EntityData = None
     device_id: str = None
@@ -98,7 +98,8 @@ def _create_async_update_entity_data(
                 entity_data is not None
                 and entity_data.client_device_info.get("channelNum", 0) > 1
             ):
-                commands.append(clientHelpers.network.create_get_channel_status())
+                commands.append(
+                    clientHelpers.network.create_get_channel_status())
 
         responses = await client.batch(commands)
         if clientHelpers.security.has_auth_failure(responses):
@@ -110,12 +111,14 @@ def _create_async_update_entity_data(
         if abilities is None:
             await client.disconnect()
             raise ConfigEntryNotReady()
-        ports = next(clientHelpers.network.get_network_ports_responses(responses), None)
+        ports = next(
+            clientHelpers.network.get_network_ports_responses(responses), None)
         if ports is None:
             await client.disconnect()
             raise ConfigEntryNotReady()
         p2p = next(clientHelpers.network.get_p2p_responses(responses), None)
-        link = next(clientHelpers.network.get_local_link_responses(responses), None)
+        link = next(
+            clientHelpers.network.get_local_link_responses(responses), None)
         client_device_info = next(
             clientHelpers.system.get_devinfo_responses(responses),
             entity_data.client_device_info if entity_data is not None else None,
@@ -146,7 +149,8 @@ def _create_async_update_entity_data(
             )
             identifiers = {(DOMAIN, uid)} if uid is not None else None
             connections = (
-                {(dr.CONNECTION_NETWORK_MAC, link["mac"])} if link is not None else None
+                {(CONNECTION_NETWORK_MAC,
+                  link["mac"])} if link is not None else None
             )
 
             device = device_registry.async_get_or_create(
@@ -192,7 +196,8 @@ def _create_async_update_entity_data(
 
 def get_poll_interval(config_entry: ConfigEntry):
     """Get the poll interval"""
-    interval = config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    interval = config_entry.options.get(
+        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     return timedelta(seconds=interval)
 
 
@@ -218,9 +223,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         )
 
     client = Client(
-        lambda base_url, timeout: async_create_clientsession(
-            hass, False, base_url=base_url, timeout=aiohttp.ClientTimeout(total=timeout)
-        )
+        # lambda base_url, timeout: hass.helpers.aiohttp_client.async_create_clientsession(
+        #    False, base_url=base_url, timeout=aiohttp.ClientTimeout(total=timeout)
+        # )
     )
     await client.connect(
         config_entry.data.get(CONF_HOST),
@@ -233,14 +238,18 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         else Encryption.NONE,
     )
 
-    with async_timeout.timeout(10):
-        if not await client.login(
-            config_entry.data.get(CONF_USERNAME),
-            config_entry.data.get(CONF_PASSWORD),
-        ):
-            raise ConfigEntryAuthFailed()
+    # use short timeout to prevent the delay of startup too much
+    try:
+        async with async_timeout.timeout(2):
+            if not await client.login(
+                config_entry.data.get(CONF_USERNAME),
+                config_entry.data.get(CONF_PASSWORD),
+            ):
+                raise ConfigEntryAuthFailed()
 
-    if not client.authenticated:
+            if not client.authenticated:
+                raise ConfigEntryNotReady()
+    except TimeoutError:
         raise ConfigEntryNotReady()
 
     update_coordinator = DataUpdateCoordinator(
@@ -249,12 +258,13 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         name=f"{DOMAIN}-common-data",
         update_interval=get_poll_interval(config_entry),
         update_method=_create_async_update_entity_data(
-            config_entry, client, dr.async_get(hass)
+            config_entry, client, hass.helpers.device_registry.async_get(hass)
         ),
     )
 
     await update_coordinator.async_config_entry_first_refresh()
-    domain_data.register_entry(config_entry.entry_id, client, update_coordinator)
+    domain_data.register_entry(
+        config_entry.entry_id, client, update_coordinator)
 
     hass.config_entries.async_setup_platforms(config_entry, PLATFORMS)
 

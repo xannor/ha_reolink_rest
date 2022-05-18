@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import logging
-from typing import cast
+from typing import cast, Callable
 
 from homeassistant.core import HomeAssistant, callback, Event
 from homeassistant.config_entries import ConfigEntry
@@ -32,7 +32,7 @@ from .typings.motion import (
     SimpleMotionData,
 )
 
-from .helpers import addons
+from .helpers import services as addon_services
 
 from .typings import motion
 
@@ -53,7 +53,8 @@ _LOGGER = logging.getLogger(__name__)
 
 def get_poll_interval(config_entry: ConfigEntry):
     """Get the poll interval"""
-    interval = config_entry.options.get(CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL)
+    interval = config_entry.options.get(
+        CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL)
     return timedelta(seconds=interval)
 
 
@@ -80,7 +81,11 @@ def _channel_supports_ai(entry_data: EntryData, abilities: int | ChannelAbilitie
 
 
 def _create_async_update_motion_data(entry_data: EntryData):
+    need_refresh: Callable[[], None] | None = None
+
     async def async_update_data():
+        nonlocal need_refresh
+
         channel_state_index: dict[int, int] = {}
         pending_commands = []
 
@@ -88,22 +93,39 @@ def _create_async_update_motion_data(entry_data: EntryData):
             if channel in channel_state_index:
                 return
             channel_state_index[channel] = len(pending_commands)
-            pending_commands.append(clientHelpers.alarm.create_get_md_state(channel))
+            pending_commands.append(
+                clientHelpers.alarm.create_get_md_state(channel))
             if _channel_supports_ai(entry_data, channel):
-                pending_commands.append(clientHelpers.ai.create_get_ai_state(channel))
+                pending_commands.append(
+                    clientHelpers.ai.create_get_ai_state(channel))
 
         def _retry():
             nonlocal need_refresh
             need_refresh()
             need_refresh = None
-            entry_data.coordinator.hass.async_add_job(
+            entry_data.motion_coordinator.hass.async_add_job(
                 entry_data.coordinator.async_refresh
             )
+
+        def do_refresh(refresh: bool = True):
+            if need_refresh is None:
+                need_refresh = entry_data.coordinator.async_add_listener(
+                    _retry)
+            if refresh:
+                entry_data.coordinator.hass.async_add_job(
+                    entry_data.coordinator.async_request_refresh
+                )
+
+        # if the main coordinator cannot succeeed we probably cant as well so we will wait for it
+        if not entry_data.coordinator.last_update_success:
+            do_refresh(False)
+            raise UpdateFailed()
 
         if entry_data.coordinator.data.channels is not None:
             channels = cast(
                 list[int],
-                entry_data.coordinator.config_entry.options.get(CONF_CHANNELS, []),
+                entry_data.coordinator.config_entry.options.get(
+                    CONF_CHANNELS, []),
             )
             for channel in (
                 channel
@@ -114,23 +136,25 @@ def _create_async_update_motion_data(entry_data: EntryData):
         else:
             append_channel_refresh(0)
 
+        if not entry_data.client.authenticated:
+            do_refresh()
+            raise UpdateFailed()
+
         try:
-            responses = await entry_data.coordinator.client.batch(pending_commands)
+            responses = await entry_data.client.batch(pending_commands)
         except Exception:
-            if need_refresh is None:
-                need_refresh = entry_data.coordinator.async_add_listener(_retry)
+            do_refresh()
             raise
         if clientHelpers.security.has_auth_failure(responses):
-            await entry_data.coordinator.logout()
-            if need_refresh is None:
-                need_refresh = entry_data.coordinator.async_add_listener(_retry)
+            do_refresh()
             raise UpdateFailed()
         ai_states = list(clientHelpers.ai.get_ai_state_responses(responses))
         channels: dict[int, motion.ChannelMotionState] = {}
         for channel, index in channel_state_index.items():
             _motion = channels.setdefault(channel, motion.ChannelMotionState())
             state = next(
-                clientHelpers.alarm.get_md_state_responses([responses[index]]), None
+                clientHelpers.alarm.get_md_state_responses(
+                    [responses[index]]), None
             )
             _motion["motion"] = state == 1
             _ai = next(
@@ -156,16 +180,11 @@ async def async_setup_entry(
     entry_data = domain_data[config_entry.entry_id]
     data_coordinator = entry_data.coordinator
 
-    services = await addons.async_get_addon_tracker(hass)
-    if (update_coordinator := entry_data.data_motion_coordinator) is None:
+    if (update_coordinator := entry_data.motion_coordinator) is None:
         update_interval = get_poll_interval(config_entry)
         if update_interval.seconds < 2:
-            update_interval = None
-        # if we have viable methods other than timed polling we will not poll
-        # TODO : detect late registration of services
-        if len([item for items in services.items() for item in items]) > 0:
-            update_interval = None
-        entry_data.data_motion_coordinator = update_coordinator = DataUpdateCoordinator(
+            update_interval = timedelta(seconds=2)
+        entry_data.motion_coordinator = update_coordinator = DataUpdateCoordinator(
             data_coordinator.hass,
             _LOGGER,
             name=f"{data_coordinator.name}-motion",
@@ -210,10 +229,14 @@ async def async_setup_entry(
             if force_refresh:
                 await update_coordinator.async_refresh()
             else:  # notify listeners of "changes" anyway
-                update_coordinator.async_set_updated_data(update_coordinator.data)
+                update_coordinator.async_set_updated_data(
+                    update_coordinator.data)
 
         event_id = f"{DOMAIN}-motion-{data_coordinator.data.uid}"
-        remove_listener = data_coordinator.hass.bus.async_listen(event_id, handle_event)
+        remove_listener = data_coordinator.hass.bus.async_listen(
+            event_id, handle_event)
+
+        await addon_services.async_setup(hass, event_id, entry_data, config_entry, update_coordinator)
 
         await update_coordinator.async_config_entry_first_refresh()
 
@@ -224,14 +247,14 @@ async def async_setup_entry(
         if data_coordinator.data.channels is not None:
             commands = list(
                 map(
-                    data_coordinator.client.create_get_ai_config,
+                    clientHelpers.ai.create_get_ai_config,
                     range(0, len(data_coordinator.data.channels) - 1),
                 )
             )
         else:
-            commands = [data_coordinator.client.create_get_ai_config(0)]
+            commands = [clientHelpers.ai.create_get_ai_config(0)]
 
-        responses = await data_coordinator.client.batch(commands)
+        responses = await entry_data.client.batch(commands)
         return {
             response["channel"]: response["AiDetectType"]
             for response in clientHelpers.ai.get_ai_config_responses(responses)
@@ -308,8 +331,8 @@ class ReolinkMotionSensor(ReolinkMotionEntity, BinarySensorEntity):
     ) -> None:
         super().__init__(
             coordinator,
-            motion_coordinator,
             channel_id,
+            motion_coordinator,
             MOTION_TYPE[ai_type],
         )
         BinarySensorEntity.__init__(
