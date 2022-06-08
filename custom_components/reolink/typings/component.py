@@ -3,15 +3,19 @@ from __future__ import annotations
 
 
 from dataclasses import dataclass, field
-from typing import Literal, Mapping, MutableMapping, overload
+from typing import Literal, Mapping, MutableMapping, TypedDict, overload
+from typing_extensions import TypeAlias
 
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from multidict import MultiMapping
 
-from reolinkapi.rest import Client
+from reolinkrestapi import Client
 from reolinkapi.typings.abilities import Abilities
 from reolinkapi.typings.network import ChannelStatus, NetworkPorts
 from reolinkapi.typings.system import DeviceInfo as Reolink_DeviceInfo
+
+from ..const import DOMAIN, DOMAIN_LITERAL
 
 from .motion import ChannelMotionState
 
@@ -29,21 +33,24 @@ class EntityData:
     device_info: DeviceInfo
 
 
-MotionData = dict[int, ChannelMotionState]
+MotionData: TypeAlias = dict[int, ChannelMotionState]
 
 
-@dataclass
-class EntryData:
+class EntryData(TypedDict):
     """Entry Data"""
 
     client: Client
     coordinator: DataUpdateCoordinator[EntityData]
-    motion_coordinator: DataUpdateCoordinator[MotionData] = field(
-        default=None, init=False)
+    motion_coordinator: DataUpdateCoordinator[MotionData] | None
+
+
+DomainEntries: TypeAlias = Mapping[str, EntryData]
+
+HassDomainData: TypeAlias = Mapping[DOMAIN_LITERAL, DomainEntries]
 
 
 @dataclass
-class DomainData(Mapping[str, EntryData]):
+class _DomainData(Mapping[str, EntryData]):
     """Domain Data"""
 
     def __post_init__(self):
@@ -87,4 +94,4 @@ class DomainData(Mapping[str, EntryData]):
         return self._entries.pop(entry_id, None)
 
 
-HassDomainData = MutableMapping[Literal["reolink"], DomainData]
+_HassDomainData = MutableMapping[Literal["reolink"], _DomainData]

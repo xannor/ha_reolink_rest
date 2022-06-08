@@ -5,12 +5,12 @@
   "issue_tracker": "https://github.com/xannor/ha_reolink/issues",
   "version": "0.0.2",
   "iot_class": "local_polling",
-  "requirements": ["reolinkapi==0.0.2"],
-  "dependencies": ["http"],
-  "after_dependencies": ["webhook"],
+  "requirements": [
+    "git+https://github.com/xannor/py_reolinkapi.git#reolinkapi==0.0.3",
+    "git+https://github.com/xannor/py_reolinkrestapi.git#reolinkrestapi==0.0.2"
+  ],
+  "dependencies": ["http", "camera"],
+  "after_dependencies": ["stream"],
   "codeowners": ["@xannor"],
-  "config_flow": true,
-  "ssdp": [],
-  "zeroconf": [],
-  "homekit": {}
+  "config_flow": true
 }

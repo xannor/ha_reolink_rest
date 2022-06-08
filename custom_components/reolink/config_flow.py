@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import cast
+from typing import TypedDict, cast
 from urllib.parse import urlparse
 from homeassistant import config_entries
 from homeassistant.core import callback
@@ -16,7 +16,6 @@ from homeassistant.const import (
     CONF_SCAN_INTERVAL,
 )
 import voluptuous as vol
-from reolinkapi.rest import Client as ReolinkClient
 from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
 from reolinkapi.const import StreamTypes as CameraStreamTypes
 from reolinkapi.typings.abilities import Abilities
@@ -25,24 +24,25 @@ from reolinkapi.typings.abilities.channel import (
     EncodingTypeAbilityVers,
 )
 from reolinkapi.typings.system import DeviceInfo
+from reolinkapi.typings.network import ChannelStatus
+from reolinkapi.typings.discovery import Device as DiscoveredDevice
 from reolinkapi.helpers.abilities.ability import NO_ABILITY
-from reolinkapi.rest.connection import Encryption
 from reolinkapi.exceptions import ReolinkError
 from reolinkapi import helpers as clientHelpers
 
+from reolinkrestapi import Client as ReolinkClient
+from reolinkrestapi.parts.connection import Encryption
 
 from .const import (
     CONF_CHANNELS,
     CONF_MOTION_INTERVAL,
     CONF_PREFIX_CHANNEL,
-    CONF_USE_AES,
     CONF_USE_HTTPS,
     DEFAULT_MOTION_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_PREFIX_CHANNEL,
     DEFAULT_SCAN_INTERVAL,
     DEFAULT_STREAM_TYPE,
-    DEFAULT_USE_AES,
     DEFAULT_USE_HTTPS,
     DOMAIN,
     OutputStreamTypes,
@@ -54,124 +54,128 @@ _LOGGER = logging.getLogger(__name__)
 OUTPUT_STREAM_TYPES = {e: e.name for e in OutputStreamTypes}
 
 
-class ReolinkBaseConfigFlow:
-    """Base Reolink options flow"""
+def _create_unique_id(
+    *,
+    uuid: str | None = None,
+    device_type: str | None = None,
+    serial: str | None = None,
+    mac: str | None = None,
+):
+    return (
+        f"reolink-uid-{uuid}"
+        if uuid is not None
+        else f"reolink-device-{device_type}-{serial}"
+        if device_type is not None and serial is not None
+        else f"reolink-mac-{mac}"
+        if mac is not None
+        else None
+    )
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._data = {}
-        self._conf_data: dict | None = None
-        self._authenticated = False
-        self._channels: dict[int, str] = None
-        self._abilities: Abilities = None
-        self._devinfo: DeviceInfo = None
-        self._unique_id: str = None
-        self._connection_id: int = 0
-        self._auth_id: int = 0
 
-    async def _update_client_data(self):
+class _DeviceData(TypedDict, total=False):
+    unique_id: str
+    channels: dict[int, str]
+    connection_id: int
+    authentication_id: int
+    abilities: Abilities
+    devinfo: DeviceInfo
 
-        try:
-            client = ReolinkClient()
-            conf_data = self._conf_data or self._data
-            hostname = conf_data.get(CONF_HOST, "")
-            port = conf_data.get(CONF_PORT, DEFAULT_PORT)
-            _timeout = conf_data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
-            encryption = Encryption.NONE
-            if conf_data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS):
-                encryption = Encryption.HTTPS
-            elif self._data.get(CONF_USE_AES, DEFAULT_USE_AES):
-                encryption = Encryption.AES
-            await client.connect(
-                hostname,
-                port,
-                _timeout,
-                encryption=encryption,
-            )
 
-            username = conf_data.get(CONF_USERNAME, DEFAULT_USERNAME)
-            password = conf_data.get(CONF_PASSWORD, DEFAULT_PASSWORD)
-            self._authenticated = await client.login(username, password)
-            if not self._authenticated:
-                self._auth_id = 0
-                return
+def _simple_channels(channels: list[ChannelStatus]):
+    return (
+        {channel["channel"]: channel["name"] for channel in channels}
+        if channels is not None
+        else None
+    )
 
-            if (
-                self._connection_id == client.connection_id
-                and self._auth_id == client.authentication_id
-            ):
-                return
 
-            if CONF_USERNAME not in conf_data:
-                conf_data[CONF_USERNAME] = username
-                conf_data[CONF_PASSWORD] = password
+async def _update_from_device(config_data: dict[str, any], **kwargs):
+    try:
+        client = ReolinkClient()
+        hostname = config_data.get(CONF_HOST, "")
+        if hostname == "":
+            return
+        port = config_data.get(CONF_PORT, DEFAULT_PORT)
+        _timeout = config_data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT)
+        encryption = Encryption.NONE
+        if config_data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS):
+            encryption = Encryption.HTTPS
+        # elif self._data.get(CONF_USE_AES, DEFAULT_USE_AES):
+        #    encryption = Encryption.AES
+        await client.connect(
+            hostname,
+            port,
+            _timeout,
+            encryption=encryption,
+        )
 
-            commands = []
-            self._connection_id = client.connection_id
-            abil = self._abilities
-            if self._auth_id != client.authentication_id:
-                abil = self._abilities = await client.get_ability()
-            else:
-                commands.append(clientHelpers.system.create_get_ability())
+        username = config_data.get(CONF_USERNAME, DEFAULT_USERNAME)
+        password = config_data.get(CONF_PASSWORD, DEFAULT_PASSWORD)
+        if not await client.login(username, password):
+            return False
 
-            if self._abilities is None:
-                return
-            self._auth_id = client.authentication_id
+        if CONF_USERNAME not in config_data:
+            config_data[CONF_USERNAME] = username
+            config_data[CONF_PASSWORD] = password
 
-            if self._abilities["p2p"]["ver"]:
-                commands.append(clientHelpers.network.create_get_p2p())
+        prior_data: _DeviceData = kwargs
+        commands = []
 
-            if self._abilities["localLink"]["ver"]:
-                commands.append(clientHelpers.network.create_get_local_link())
+        if prior_data.get("authentication_id", 0) != client.authentication_id:
+            abilities = await client.get_ability()
+        else:
+            abilities = prior_data.get("abilities", None)
+            commands.append(clientHelpers.system.create_get_ability())
 
-            if self._abilities["devInfo"]["ver"]:
-                commands.append(clientHelpers.system.create_get_device_info())
-            if self._devinfo is not None and self._devinfo["channelNum"] > 1:
-                commands.append(
-                    clientHelpers.network.create_get_channel_status())
+        if abilities is None:
+            return
 
-            responses = await client.batch(commands)
-            self._abilities = next(
-                clientHelpers.system.get_ability_responses(responses), abil
-            )
+        if abilities["p2p"]["ver"]:
+            commands.append(clientHelpers.network.create_get_p2p())
 
-            if self._abilities is None:
-                return
-            p2p = next(clientHelpers.network.get_p2p_responses(responses), None)
-            link = next(
-                clientHelpers.network.get_local_link_responses(responses), None)
-            self._devinfo = next(
-                clientHelpers.system.get_devinfo_responses(responses))
-            channels = next(
-                clientHelpers.network.get_channel_status_responses(
-                    responses), None
-            )
-            if (
-                self._devinfo is not None
-                and self._devinfo["channelNum"] > 1
-                and channels is None
-            ):
-                channels = await client.get_channel_status()
-            elif channels is not None:
-                channels = channels["status"]
-            self._channels = (
-                {channel["channel"]: channel["name"] for channel in channels}
-                if channels is not None
-                else None
-            )
+        if abilities["localLink"]["ver"]:
+            commands.append(clientHelpers.network.create_get_local_link())
 
-            self._unique_id = (
-                f'reolink-uid-{p2p["uid"]}'
-                if p2p is not None
-                else f'reolink-device-{self._devinfo["type"]}-{self._devinfo["serial"]}'
-                if self._devinfo is not None
-                else f'reolink-mac-{link["mac"]}'
-                if link is not None
-                else None
-            )
+        if abilities["devInfo"]["ver"]:
+            commands.append(clientHelpers.system.create_get_device_info())
+        devinfo: DeviceInfo = prior_data.get("devinfo", None)
+        if devinfo is not None and devinfo["channelNum"] > 1:
+            commands.append(clientHelpers.network.create_get_channel_status())
 
-        finally:
-            await client.disconnect()
+        responses = await client.batch(commands)
+        abilities = next(
+            clientHelpers.system.get_ability_responses(responses), abilities
+        )
+
+        if abilities is None:
+            return
+        p2p = next(clientHelpers.network.get_p2p_responses(responses), None)
+        link = next(clientHelpers.network.get_local_link_responses(responses), None)
+        devinfo = next(clientHelpers.system.get_devinfo_responses(responses))
+        channels = next(
+            clientHelpers.network.get_channel_status_responses(responses), None
+        )
+        if devinfo is not None and devinfo["channelNum"] > 1 and channels is None:
+            channels = await client.get_channel_status()
+        elif channels is not None:
+            channels = channels["status"]
+
+        return _DeviceData(
+            unique_id=_create_unique_id(
+                uuid=p2p["uid"] if p2p is not None else None,
+                device_type=devinfo["type"] if devinfo is not None else None,
+                serial=devinfo["serial"] if devinfo is not None else None,
+                mac=link["mac"] if link is not None else None,
+            ),
+            channels=_simple_channels(channels),
+            connection_id=client.connection_id,
+            authentication_id=client.authentication_id,
+            abilities=abilities,
+            devinfo=devinfo,
+        )
+
+    finally:
+        await client.disconnect()
 
 
 def _normalize_host(user_input: dict):
@@ -204,9 +208,7 @@ def _connect_schema(prior_input: dict) -> dict:
         vol.Required(CONF_HOST, default=prior_input.get(CONF_HOST)): str,
         vol.Optional(
             CONF_PORT,
-            description={
-                "suggested_value": prior_input.get(CONF_PORT, DEFAULT_PORT)
-            },
+            description={"suggested_value": prior_input.get(CONF_PORT, DEFAULT_PORT)},
         ): cv.port,
         vol.Required(
             CONF_USE_HTTPS,
@@ -234,8 +236,7 @@ def _channels_schema(prior_input: dict, channels: dict) -> dict:
     return {
         vol.Required(
             CONF_PREFIX_CHANNEL,
-            default=prior_input.get(
-                CONF_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
+            default=prior_input.get(CONF_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
         ): bool,
         vol.Required(
             CONF_CHANNELS,
@@ -252,8 +253,7 @@ def _options_schema(prior_input: dict):
         ): cv.positive_int,
         vol.Required(
             CONF_MOTION_INTERVAL,
-            default=prior_input.get(
-                CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL),
+            default=prior_input.get(CONF_MOTION_INTERVAL, DEFAULT_MOTION_INTERVAL),
         ): cv.positive_int,
     }
 
@@ -268,10 +268,7 @@ def _channel_schema(
         _key = f"{stream.name.lower()}_type"
         out_types = supported_output_types
         def_type = DEFAULT_STREAM_TYPE[stream]
-        if (
-            stream == CameraStreamTypes.MAIN
-            and main == EncodingTypeAbilityVers.H265
-        ):
+        if stream == CameraStreamTypes.MAIN and main == EncodingTypeAbilityVers.H265:
             out_types = supported_output_types.copy()
             out_types.pop(OutputStreamTypes.RTMP, None)
         if def_type not in out_types:
@@ -289,49 +286,63 @@ def _channel_schema(
     if live == LiveAbilityVers.MAIN_EXTERN_SUB:
         schema.append(_create_schema(CameraStreamTypes.EXT))
 
-    return {_k: _v for _k, _v in schema}
+    return dict(schema)
 
 
-class ReolinkConfigFlow(
-    ReolinkBaseConfigFlow, config_entries.ConfigFlow, domain=DOMAIN
-):
+class ReolinkConfigFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
     """Reolink configuration flow"""
 
     VERSION = 1
 
-    async def _update_client_data(self):
-        await super()._update_client_data()
-        if self._devinfo is not None:
-            placeholders: dict = self.context.setdefault(
-                "title_placeholders", {})
-            placeholders["name"] = self._devinfo["name"]
-            placeholders["type"] = self._devinfo["type"]
+    def __init__(self) -> None:
+        super().__init__()
+        self._data = {}
+        self._device: _DeviceData = {}
+
+    async def async_step_discovery(
+        self, discovery_info: config_entries.DiscoveryInfoType
+    ):
+        device: DiscoveredDevice = discovery_info
+        placeholders: dict = self.context.setdefault("title_placeholders", {})
+        placeholders["name"] = device["name"]
+        existing = await self.async_set_unique_id(
+            _create_unique_id(uuid=device["uuid"], mac=device["mac"])
+        )
+        if existing is not None:
+            return self.async_abort(reason="already_configured")
+
+        user_data = {CONF_HOST: device["ip"]}
+
+        return await self._update_data(user_data)
 
     async def async_step_user(self, user_input: dict[str, any] | None = None):
-        """Initial user setup"""
-
         return await self.async_step_connect(user_input)
 
-    async def _setup_entry(self):
+    async def _update_data(self, config_data: dict[str, any]):
+        if config_data is not None:
+            self._data.update(config_data)
+
         try:
-            await self._update_client_data()
+            data = await _update_from_device(self._data, **self._device)
         except ReolinkError:
             return await self.async_step_connect(self._data, {"base": "cannot_connect"})
-        if not self._authenticated:
+        if data is False:
             return await self.async_step_login(self._data, {"base": "invalid_auth"})
-        if self._abilities is None:
+        if data is None or data.get("abilities", None) is None:
             return await self.async_step_connect(self._data, {"base": "cannot_connect"})
+        self._device.update(data)
 
-        if self._channels and CONF_CHANNELS not in self._data:
+        if data.get("channels", None) is not None and CONF_CHANNELS not in self._data:
             return await self.async_step_channels(
                 self._data, {CONF_CHANNELS: "channel_required"}
             )
 
-        if self._unique_id is not None:
-            await self.async_set_unique_id(self._unique_id)
-            self._abort_if_unique_id_configured()
+        if self.unique_id is None:
+            entry = await self.async_set_unique_id(self._device.get("unique_id", None))
+            if entry is not None:
+                return self.async_abort(reason="already_configured")
 
-        title = self._devinfo["name"]
+        title = self._device["devinfo"]["name"]
 
         return self.async_create_entry(title=title, data=self._data)
 
@@ -345,17 +356,18 @@ class ReolinkConfigFlow(
             if hostname is not None:
                 _normalize_host(user_input)
 
-                self._data.update(user_input)
-                return await self._setup_entry()
+                return await self._update_data(user_input)
 
         return self.async_show_form(
             step_id="connect",
             description_placeholders={CONF_PORT: "Default"},
-            data_schema=vol.Schema(
-                _connect_schema(user_input or self._data or {})
-            ),
+            data_schema=vol.Schema(_connect_schema(user_input or self._data or {})),
             errors=errors,
         )
+
+    async def async_step_reauth(self, user_input: dict[str, any] | None = None):
+        """Handle configuration re-auth"""
+        return await self.async_step_login(user_input)
 
     async def async_step_login(
         self, user_input: dict[str, any] = None, errors: dict = None
@@ -363,14 +375,11 @@ class ReolinkConfigFlow(
         """Login information"""
 
         if user_input is not None and errors is None:
-            self._data.update(user_input)
-            return await self._setup_entry()
+            return await self._update_data(user_input)
 
         return self.async_show_form(
             step_id="login",
-            data_schema=vol.Schema(
-                _login_schema(user_input or {})
-            ),
+            data_schema=vol.Schema(_login_schema(user_input or {})),
             errors=errors,
         )
 
@@ -380,81 +389,42 @@ class ReolinkConfigFlow(
         """Channels Info"""
 
         if user_input is not None and errors is None:
-            self._data.update(user_input)
-            return await self._setup_entry()
+            return await self._update_data(user_input)
 
         return self.async_show_form(
             step_id="channels",
             description_placeholders={
-                "name": self._devinfo["name"],
+                "name": self._device["devinfo"]["name"],
             },
             data_schema=vol.Schema(
-                _channels_schema(user_input or {}, self._channels)
+                _channels_schema(user_input or {}, self._device["channels"])
             ),
             errors=errors,
         )
 
-    async def async_step_reauth(self, user_input: dict[str, any] = None):
-        """re-authenticate"""
-        return await self.async_step_login(user_input)
-
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry):
-        """get options flow"""
-        return ReolinkOptionsFlow(config_entry)
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> config_entries.OptionsFlow:
+        """Get the options flow for this handler."""
+        return ReolinkOptionsFlowHandler(config_entry)
 
 
 CONF_MENU_CHOICE = "menu_choice"
 
 
-class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
+class ReolinkOptionsFlowHandler(config_entries.OptionsFlow):
     """Reolink options flow"""
 
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         super().__init__()
-        self._data.update(config_entry.options)
-        self._conf_data = config_entry.data.copy()
-        self._entry_id = config_entry.entry_id
-        self._entry_data: component.EntryData = None
-
-    async def _update_client_data(self):
-        if self._entry_data is None and self._connection_id == 0:
-            domain_data = cast(component.HassDomainData,
-                               self.hass.data)[DOMAIN]
-            self._entry_data = domain_data[self._entry_id]
-            self._connection_id = self._entry_data.client.connection_id
-            self._auth_id = self._entry_data.client.authentication_id
-            self._authenticated = self._entry_data.client.authenticated
-
-        if (
-            self._entry_data.client.connection_id != self._connection_id
-            or self._entry_data.client.authentication_id != self._auth_id
-        ):
-            return await super()._update_client_data()
-
-        self._abilities = self._entry_data.coordinator.data.abilities
-        self._devinfo = self._entry_data.coordinator.data.client_device_info
-        self._channels = (
-            {
-                channel["channel"]: channel["name"]
-                for channel in self._entry_data.coordinator.data.channels
-            }
-            if self._entry_data.coordinator.data.channels is not None
-            else None
-        )
+        self._entry = config_entry
+        self._data = {}
+        self._device: _DeviceData = {}
 
     async def async_step_init(self, user_input: dict[str, any] = None):
         """init"""
-        await self._update_client_data()
-        return await self.async_step_menu(user_input)
-
-    async def _setup_entry(self):
-        await self._update_client_data()
-        return await self.async_step_menu()
-
-    async def async_step_menu(self, user_input: dict[str, any] = None):
-        """Menu"""
 
         if user_input is not None:
             choice = user_input.get(CONF_MENU_CHOICE, "done")
@@ -468,13 +438,25 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
                 self.context["channel_id"] = int(choice[8:])
                 return await self.async_step_channel(self._data, {})
 
+        if self._device.get("connection_id", 0) == 0:
+            domain_data = cast(component.HassDomainData, self.hass.data)[DOMAIN]
+            entry_data = domain_data[self._entry.entry_id]
+            client = entry_data["client"]
+            device_data = entry_data["coordinator"].data
+            self._device["connection_id"] = client.connection_id
+            self._device["authentication_id"] = client.authentication_id
+            self._device["abilities"] = device_data.abilities
+            self._device["devinfo"] = device_data.device_info
+            self._device["unique_id"] = self._entry.entry_id
+            self._device["channels"] = _simple_channels(device_data.channels)
+
         choices = [("options", "General Settings")]
 
-        if self._channels is not None:
+        if self._device.get("channels", None) is not None:
             choices.extend(
                 (
                     (f"channel_{key}", f"Configure ({name})")
-                    for key, name in self._channels.items()
+                    for key, name in self._device["channels"].items()
                 )
             )
         else:
@@ -484,10 +466,9 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         choices = {_k: _v for _k, _v in choices}
 
         return self.async_show_form(
-            step_id="menu",
+            step_id="init",
             data_schema=vol.Schema(
-                {vol.Required(CONF_MENU_CHOICE, default="done")
-                              : vol.In(choices)}
+                {vol.Required(CONF_MENU_CHOICE, default="done"): vol.In(choices)}
             ),
         )
 
@@ -498,15 +479,15 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
         if user_input is not None and errors is None:
             self._data.update(user_input)
-            return await self._setup_entry()
+            return await self.async_step_init()
 
         return self.async_show_form(
             step_id="channels",
             description_placeholders={
-                "name": self._devinfo["name"],
+                "name": self._device["devinfo"]["name"],
             },
             data_schema=vol.Schema(
-                _channels_schema(user_input or {}, self._channels)
+                _channels_schema(user_input or {}, self._device["channels"])
             ),
             errors=errors,
         )
@@ -518,8 +499,7 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
         def _update_type(stream: CameraStreamTypes):
             keys = _key_pair(stream)
-            self._data[keys[1]] = user_input.get(
-                keys[0], DEFAULT_STREAM_TYPE[stream])
+            self._data[keys[1]] = user_input.get(keys[0], DEFAULT_STREAM_TYPE[stream])
 
         _update_type(CameraStreamTypes.MAIN)
         _update_type(CameraStreamTypes.SUB)
@@ -537,7 +517,7 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
             if keys[1] in user_input:
                 channel_input[keys[0]] = user_input[keys[1]]
 
-        live = self._abilities["abilityChn"][channel_id]["live"]["ver"]
+        live = self._device["abilities"]["abilityChn"][channel_id]["live"]["ver"]
         if live in (LiveAbilityVers.MAIN_SUB, LiveAbilityVers.MAIN_EXTERN_SUB):
             _update_option(CameraStreamTypes.MAIN)
             _update_option(CameraStreamTypes.SUB)
@@ -548,9 +528,9 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
     def _get_output_streams(self):
         output_types: list[OutputStreamTypes] = []
-        if self._abilities["rtsp"]["ver"]:
+        if self._device["abilities"]["rtsp"]["ver"]:
             output_types.append(OutputStreamTypes.RTSP)
-        if self._abilities["rtmp"]["ver"]:
+        if self._device["abilities"]["rtmp"]["ver"]:
             output_types.append(OutputStreamTypes.RTMP)
         output_types.append(OutputStreamTypes.MJPEG)
         return {_type: _type.name for _type in output_types}
@@ -564,28 +544,31 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
         if user_input is not None and errors is None:
             self._update_channel_options(channel_id, user_input)
             self.context.pop("channel_id", None)
-            return await self._setup_entry()
+            return await self.async_step_init()
 
-        user_input = self._get_channel_options(
-            channel_id, user_input or self._data)
+        user_input = self._get_channel_options(channel_id, user_input or self._data)
         output_types = self._get_output_streams()
-        live = self._abilities["abilityChn"][channel_id]["live"]["ver"]
+        live = self._device["abilities"]["abilityChn"][channel_id]["live"]["ver"]
         main = (
-            self._abilities["abilityChn"][channel_id]
+            self._device["abilities"]["abilityChn"][channel_id]
             .get("mainEncType", NO_ABILITY)
             .get("ver", EncodingTypeAbilityVers.H264)
         )
 
-        name = self._channels[channel_id] if self._channels is not None else "Stream"
+        name = (
+            self._device["channels"][channel_id]
+            if self._device["channels"] is not None
+            else "Stream"
+        )
 
         return self.async_show_form(
             step_id="channel",
             description_placeholders={
-                "name": self._devinfo["name"], "channel": name},
+                "name": self._device["devinfo"]["name"],
+                "channel": name,
+            },
             data_schema=vol.Schema(
-                _channel_schema(
-                    live, main, output_types, user_input
-                )
+                _channel_schema(live, main, output_types, user_input)
             ),
             errors=errors,
         )
@@ -597,11 +580,11 @@ class ReolinkOptionsFlow(ReolinkBaseConfigFlow, config_entries.OptionsFlow):
 
         if user_input is not None and errors is None:
             self._data.update(user_input)
-            return await self._setup_entry()
+            return await self.async_step_init()
 
         return self.async_show_form(
             step_id="options",
-            description_placeholders={"name": self._devinfo["name"]},
+            description_placeholders={"name": self._device["devinfo"]["name"]},
             data_schema=vol.Schema(_options_schema(user_input)),
             errors=errors,
         )

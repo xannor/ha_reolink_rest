@@ -1,6 +1,5 @@
 {
     "name": "Reolink IP Devices",
-    "domains": "camera",
     "iot_class": "Local Push",
     "homeassistant": "2022.2.6"
   }

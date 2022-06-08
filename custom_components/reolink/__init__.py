@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import logging
-from typing import cast
+from typing import MutableMapping, cast
 import aiohttp
 import async_timeout
 
@@ -27,8 +27,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
 
-from reolinkapi.rest import Client
-from reolinkapi.rest.connection import Encryption
+from reolinkrestapi import Client
+from reolinkrestapi.parts.connection import Encryption
 from reolinkapi.const import DEFAULT_TIMEOUT
 from reolinkapi.typings import system as rs, abilities as ra
 from reolinkapi.helpers.abilities.ability import NO_ABILITY
@@ -36,16 +36,17 @@ from reolinkapi import helpers as clientHelpers
 
 from .utility import astypeddict
 
-from .typings.component import DomainData, HassDomainData, EntityData
+from .typings.component import (
+    EntryData,
+    EntityData,
+)
 
 from .const import (
     CONF_CHANNELS,
     CONF_MOTION_INTERVAL,
-    CONF_USE_AES,
     CONF_USE_HTTPS,
     DEFAULT_MOTION_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
-    DEFAULT_USE_AES,
     DEFAULT_USE_HTTPS,
     DOMAIN,
 )
@@ -98,8 +99,7 @@ def _create_async_update_entity_data(
                 entity_data is not None
                 and entity_data.client_device_info.get("channelNum", 0) > 1
             ):
-                commands.append(
-                    clientHelpers.network.create_get_channel_status())
+                commands.append(clientHelpers.network.create_get_channel_status())
 
         responses = await client.batch(commands)
         if clientHelpers.security.has_auth_failure(responses):
@@ -111,14 +111,12 @@ def _create_async_update_entity_data(
         if abilities is None:
             await client.disconnect()
             raise ConfigEntryNotReady()
-        ports = next(
-            clientHelpers.network.get_network_ports_responses(responses), None)
+        ports = next(clientHelpers.network.get_network_ports_responses(responses), None)
         if ports is None:
             await client.disconnect()
             raise ConfigEntryNotReady()
         p2p = next(clientHelpers.network.get_p2p_responses(responses), None)
-        link = next(
-            clientHelpers.network.get_local_link_responses(responses), None)
+        link = next(clientHelpers.network.get_local_link_responses(responses), None)
         client_device_info = next(
             clientHelpers.system.get_devinfo_responses(responses),
             entity_data.client_device_info if entity_data is not None else None,
@@ -149,8 +147,7 @@ def _create_async_update_entity_data(
             )
             identifiers = {(DOMAIN, uid)} if uid is not None else None
             connections = (
-                {(CONNECTION_NETWORK_MAC,
-                  link["mac"])} if link is not None else None
+                {(CONNECTION_NETWORK_MAC, link["mac"])} if link is not None else None
             )
 
             device = device_registry.async_get_or_create(
@@ -196,21 +193,19 @@ def _create_async_update_entity_data(
 
 def get_poll_interval(config_entry: ConfigEntry):
     """Get the poll interval"""
-    interval = config_entry.options.get(
-        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    interval = config_entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
     return timedelta(seconds=interval)
 
 
 async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     """Setup Device"""
 
-    domain_data: DomainData = hass.data.setdefault(DOMAIN, DomainData())
+    domain_data: dict = hass.data.setdefault(DOMAIN, {})
 
     if not config_entry.options:
         options = {
             CONF_SCAN_INTERVAL: DEFAULT_SCAN_INTERVAL,
             CONF_MOTION_INTERVAL: DEFAULT_MOTION_INTERVAL,
-            CONF_USE_AES: DEFAULT_USE_AES,
         }
         data = config_entry.data.copy()
         channels = data.pop(CONF_CHANNELS, None)
@@ -233,8 +228,8 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
         config_entry.data.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
         encryption=Encryption.HTTPS
         if config_entry.data.get(CONF_USE_HTTPS, DEFAULT_USE_HTTPS)
-        else Encryption.AES
-        if config_entry.options.get(CONF_USE_AES, DEFAULT_USE_AES)
+        # else Encryption.AES
+        # if config_entry.options.get(CONF_USE_AES, DEFAULT_USE_AES)
         else Encryption.NONE,
     )
 
@@ -263,8 +258,9 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     )
 
     await update_coordinator.async_config_entry_first_refresh()
-    domain_data.register_entry(
-        config_entry.entry_id, client, update_coordinator)
+    domain_data[config_entry.entry_id] = EntryData(
+        client=client, coordinator=update_coordinator
+    )
 
     hass.config_entries.async_setup_platforms(config_entry, PLATFORMS)
 
@@ -283,10 +279,12 @@ async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     )
     if unload_ok:
         if (
-            domain_data := cast(HassDomainData, hass.data).get(DOMAIN, None)
+            domain_data := cast(MutableMapping[str, EntryData], hass.data).get(
+                DOMAIN, None
+            )
         ) and domain_data is not None:
             if (
-                entry_data := domain_data.remove_entry(config_entry.entry_id)
+                entry_data := domain_data.pop(config_entry.entry_id, None)
             ) and entry_data is not None:
                 await entry_data.client.disconnect()
 

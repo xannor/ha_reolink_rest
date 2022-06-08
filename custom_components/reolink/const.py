@@ -21,6 +21,7 @@ class OutputStreamTypes(IntEnum):
 
 
 DOMAIN = "reolink"
+DOMAIN_LITERAL = Literal["reolink"]
 
 DEFAULT_PORT = 0
 DEFAULT_USE_HTTPS = False
@@ -32,13 +33,11 @@ DEFAULT_STREAM_TYPE = {
     CameraStreamTypes.SUB: OutputStreamTypes.RTMP,
     CameraStreamTypes.EXT: OutputStreamTypes.RTMP,
 }
-DEFAULT_USE_AES = False
 
 CONF_USE_HTTPS = "use_https"
 CONF_CHANNELS = "channels"
 CONF_PREFIX_CHANNEL = "prefix_channel"
 CONF_MOTION_INTERVAL = "motion_interval"
-CONF_USE_AES = "use_aes"
 
 CAMERA_TYPES: Final[dict[CameraStreamTypes, CameraEntityDescription]] = {
     CameraStreamTypes.MAIN: CameraEntityDescription(
