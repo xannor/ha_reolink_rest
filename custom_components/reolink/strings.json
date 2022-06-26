@@ -1,17 +1,26 @@
 {
   "title": "Reolink Device",
   "config": {
-    "flow_title": "{name} ({type})",
+    "flow_title": "{name}",
     "step": {
-      "connect": {
+      "user": {
+        "title": "Initializing...",
+        "description": "",
+        "menu_options": {
+          "stop_discovery": "Stop Discovery",
+          "discovery": "Attempt Discovery",
+          "connection": "Manual Setup"
+        }
+      },
+      "connection": {
         "title": "Connect to device",
         "data": {
           "host": "[%key:common::config_flow::data::host%]",
           "port": "[%key:common::config_flow::data::port%]",
-          "use_https": "[%key:common::config_flow::data::use_https%]"
+          "use_https": "HTTPS"
         }
       },
-      "login": {
+      "auth": {
         "title": "Login",
         "data": {
           "username": "[%key:common::config_flow::data::username%]",
@@ -30,18 +39,22 @@
       "cannot_connect": "[%key:common::config_flow::error::cannot_connect%]",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "unknown": "[%key:common::config_flow::error::unknown%]",
+      "timeout": "[%key:common::config_flow::error::timeout_connect%]",
       "channel_required": "Channel selection is required"
     },
     "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
+      "discovery_started": "The discovery process has been started and you should see discovered devices showing up in your device list shortly. If no devices show up after a few seconds, check your firewall settings."
     }
   },
   "options": {
     "step": {
-      "menu": {
+      "init": {
         "description": "Configuration Menu",
-        "data": {
-          "menu_choice": "Choose option to configure"
+        "menu_options": {
+          "options": "Device Options",
+          "channels": "Device Channels",
+          "commit": "Done"
         }
       },
       "options": {
@@ -56,14 +69,6 @@
         "data": {
           "prefix_channel": "Channel Prefix",
           "channels": "Channels"
-        }
-      },
-      "channel": {
-        "title": "Configure Streams",
-        "data": {
-          "main_type": "Main Stream Type",
-          "sub_type": "Sub Stream Type",
-          "ext_type": "Ext Stream Type"
         }
       }
     }

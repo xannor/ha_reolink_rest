@@ -11,6 +11,26 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
 )
 
+DOMAIN: Final = "reolink"
+
+DEFAULT_PORT: Final = None
+DEFAULT_USE_HTTPS: Final = False
+DEFAULT_PREFIX_CHANNEL: Final = True
+DEFAULT_SCAN_INTERVAL: Final = 60
+DEFAULT_MOTION_INTERVAL: Final = 5
+
+CONF_USE_HTTPS: Final = "use_https"
+CONF_CHANNELS: Final = "channels"
+CONF_PREFIX_CHANNEL: Final = "prefix_channel"
+CONF_MOTION_INTERVAL: Final = "motion_interval"
+
+SETTING_DISCOVERY: Final = "discovery"
+SETTING_DISCOVERY_INTERVAL: Final = "interval"
+SETTING_DISCOVERY_STARTUP: Final = "startup"
+SETTING_DISCOVERY_BROADCAST = "broadcast"
+
+# keep? ---\/
+
 
 class OutputStreamTypes(IntEnum):
     """Out stream Types"""
@@ -20,24 +40,12 @@ class OutputStreamTypes(IntEnum):
     RTSP = 2
 
 
-DOMAIN = "reolink"
-DOMAIN_LITERAL = Literal["reolink"]
-
-DEFAULT_PORT = 0
-DEFAULT_USE_HTTPS = False
-DEFAULT_PREFIX_CHANNEL = True
-DEFAULT_SCAN_INTERVAL = 60
-DEFAULT_MOTION_INTERVAL = 10
 DEFAULT_STREAM_TYPE = {
     CameraStreamTypes.MAIN: OutputStreamTypes.RTMP,
     CameraStreamTypes.SUB: OutputStreamTypes.RTMP,
     CameraStreamTypes.EXT: OutputStreamTypes.RTMP,
 }
 
-CONF_USE_HTTPS = "use_https"
-CONF_CHANNELS = "channels"
-CONF_PREFIX_CHANNEL = "prefix_channel"
-CONF_MOTION_INTERVAL = "motion_interval"
 
 CAMERA_TYPES: Final[dict[CameraStreamTypes, CameraEntityDescription]] = {
     CameraStreamTypes.MAIN: CameraEntityDescription(

@@ -7,6 +7,7 @@ from ipaddress import IPv4Address
 import logging
 
 from dataclasses import asdict
+from typing import Callable, Final
 
 from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY
 from homeassistant.core import HomeAssistant, callback, CALLBACK_TYPE
@@ -20,101 +21,39 @@ from reolinkapi.discovery import (
     Device as DiscoveredDevice,
 )
 
-from .const import DOMAIN
+from .settings import Settings, async_get_settings
+
+from .const import DOMAIN, SETTING_DISCOVERY, SETTING_DISCOVERY_BROADCAST
 
 _LOGGER = logging.getLogger(__name__)
 
-LISTENERS = "listeners"
+DISCOVERY: Final = "discovery"
 
-LISTENER_CLEANUP = "listener_cleanup"
+DISCOVERY_INTERVAL: Final = timedelta(seconds=5)
 
-DISCOVERED = "discovered"
-
-DISCOVERY = "discovery"
-
-DISCOVERY_CLEANUP = "discovery_cleanup"
-
-DISCOVERY_INTERVAL = timedelta(seconds=5)
+DEVICE_CALLBACK: Final = Callable[
+    [DiscoveredDevice], None
+]  # pylint: disable=invalid-name
 
 
-class _Protocol(DiscoveryProtocol):
-    def __init__(self, ping_message: bytes = ...) -> None:
-        super().__init__(ping_message)
-        self._cache: list[DiscoveredDevice] = []
+class Protocol(DiscoveryProtocol):
+    """Protocol"""
 
-    @property
-    def discovered(self):
-        """Devices discovered so far"""
-        cache = self._cache
-        self._cache = []
-        return cache
+    def __init__(self) -> None:
+        super().__init__()
+        self._discovery_callback: DEVICE_CALLBACK = lambda _: None
 
     def discovered_device(self, device: DiscoveredDevice) -> None:
-        self._cache.append(device)
+        self._discovery_callback(device)
 
-    @classmethod
-    async def listen(
-        cls, address: str = "0.0.0.0", port: int = ...
-    ) -> tuple[asyncio.BaseTransport, _Protocol]:
-        return await super().listen(address, port)
+    @property
+    def discovery_callback(self):
+        """Callback"""
+        return self._discovery_callback
 
-
-@bind_hass
-async def async_start_listener(hass: HomeAssistant, address: str = "0.0.0.0"):
-    """Start discovery listener"""
-    domain_data: dict = hass.data.setdefault(DOMAIN, {})
-    listeners: dict[
-        str, tuple[asyncio.BaseTransport, _Protocol]
-    ] = domain_data.setdefault(LISTENERS, {})
-
-    if address != "0.0.0.0":
-        targets = [address]
-    else:
-        targets = [
-            str(addr)
-            for addr in filter(
-                lambda addr: isinstance(addr, IPv4Address),
-                await network.async_get_enabled_source_ips(hass),
-            )
-        ]
-
-    targets = [filter(lambda addr: addr not in listeners, targets)]
-
-    if len(targets) < 1:
-        return
-
-    for target in targets:
-        listener = await _Protocol.listen(target)
-        listeners[target] = listener
-
-    # register global listener cleanup
-    if LISTENER_CLEANUP not in domain_data:
-        domain_data[LISTENER_CLEANUP] = hass.bus.async_listen_once(
-            EVENT_HOMEASSISTANT_STOP, lambda _: async_stop_listener(hass)
-        )
-
-
-@callback
-@bind_hass
-def async_stop_listener(hass: HomeAssistant, address: str = "0.0.0.0"):
-    "Stop discovery listener"
-    domain_data: dict | None = hass.data.get(DOMAIN, None)
-    listeners: dict[str, tuple[asyncio.BaseTransport, _Protocol]] | None = (
-        domain_data.get(LISTENERS, None) if domain_data is not None else None
-    )
-
-    if listeners is None:
-        return
-
-    if address == "0.0.0.0":
-        targets = [listeners.keys()]
-    else:
-        targets = [address]
-
-    for target in targets:
-        listener = listeners.pop(target, None)
-        if listener is not None:
-            listener[0].close()
+    @discovery_callback.setter
+    def discovery_callback(self, value: DEVICE_CALLBACK):
+        self._discovery_callback = value
 
 
 @callback
@@ -126,22 +65,62 @@ def async_start_discovery(
 
     domain_data: dict = hass.data.setdefault(DOMAIN, {})
     if DISCOVERY in domain_data:
-        return
+        return False
 
-    async def _async_discovery(*_: any):
-        async_trigger_discovery(hass, await async_discover_devices(hass, 5))
+    listeners: list[tuple[asyncio.BaseTransport, Protocol]] = []
+    interval_cleanup: CALLBACK_TYPE = lambda: None
+
+    def _cleanup():
+        nonlocal interval_cleanup
+        interval_cleanup()
+        for (transport, _) in listeners:
+            transport.close()
+
+    bus_cleanup: CALLBACK_TYPE = None
+
+    def _shutdown():
+        bus_cleanup()
+        _cleanup()
+
+    domain_data[DISCOVERY] = _shutdown
+
+    bus_cleanup = hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _cleanup)
+
+    async def _ping(*_):
+        # support an override setting for complex setups
+        settings: Settings = await async_get_settings(hass)
+        if addr := settings.get(SETTING_DISCOVERY, {}).get(
+            SETTING_DISCOVERY_BROADCAST, None
+        ):
+            Protocol.ping(str(addr))
+            return True
+
+        for addr in await network.async_get_ipv4_broadcast_addresses(hass):
+            Protocol.ping(str(addr))
+        return True
+
+    def _discovered(device: DiscoveredDevice):
+        hass.create_task(
+            hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": SOURCE_INTEGRATION_DISCOVERY},
+                data=asdict(device),
+            )
+        )
 
     async def _startup():
-        await async_start_listener(hass)
-        await _async_discovery()
+        nonlocal interval_cleanup
+        for addr in await network.async_get_enabled_source_ips(hass):
+            if not isinstance(addr, IPv4Address):
+                continue
+            listener = await Protocol.listen(str(addr))
+            listener[1].discovery_callback = _discovered
+            listeners.append(listener)
 
-    domain_data[DISCOVERY] = async_track_time_interval(hass, _async_discovery, interval)
-    hass.create_task(_startup)
+        # interval_cleanup = async_track_time_interval(hass, _ping, interval)
+        await _ping()
 
-    if DISCOVERY_CLEANUP not in domain_data:
-        domain_data[DISCOVERY_CLEANUP] = hass.bus.async_listen_once(
-            EVENT_HOMEASSISTANT_STOP, lambda _: async_stop_discovery(hass)
-        )
+    hass.create_task(_startup())
 
 
 @callback
@@ -149,58 +128,21 @@ def async_start_discovery(
 def async_stop_discovery(hass: HomeAssistant):
     """Stop Discovery"""
     domain_data: dict = hass.data.get(DOMAIN, None)
-    discovery: CALLBACK_TYPE | None = (
-        domain_data.pop(DISCOVERY, None) if domain_data is not None else None
-    )
-    if discovery is None:
+    if domain_data is None:
         return
-    discovery()
-
-
-@bind_hass
-async def async_discover_devices(
-    hass: HomeAssistant, delay: float = 0, address: str = "0.0.0.0"
-):
-    """Discover Reolink devices"""
-
-    domain_data: dict | None = hass.data.get(DOMAIN, None)
-    listeners: dict[str, tuple[asyncio.BaseTransport, _Protocol]] | None = (
-        domain_data.get(LISTENERS, None) if domain_data is not None else None
-    )
-
-    if listeners is None:
-        return
-
-    if address != "0.0.0.0":
-        targets = [address]
-    else:
-        targets = [
-            str(addr) for addr in await network.async_get_ipv4_broadcast_addresses(hass)
-        ]
-
-    for target in targets:
-        _Protocol.ping(target)
-
-    if delay > 0:
-        await asyncio.sleep(delay)
-
-    devices = (
-        device
-        for discovered in map(lambda t: t[1].discovered, listeners.values())
-        for device in discovered
-    )
-    return tuple(devices)
+    cleanup: CALLBACK_TYPE = domain_data.pop(DISCOVERY, None)
+    if cleanup is not None:
+        cleanup()
 
 
 @callback
 @bind_hass
-def async_trigger_discovery(hass: HomeAssistant, *discovered_devices: DiscoveredDevice):
-    """Trigger config flow for discovered devices"""
-    for device in discovered_devices:
-        hass.async_create_task(
-            hass.config_entries.flow.async_init(
-                DOMAIN,
-                context={"source": SOURCE_INTEGRATION_DISCOVERY},
-                data=asdict(device),
-            )
-        )
+def async_discovery_active(hass: HomeAssistant):
+    """Check if discovery is running"""
+    domain_data: dict = hass.data.get(DOMAIN, None)
+    if domain_data is None:
+        return False
+    return DISCOVERY in domain_data
+
+
+__all__ = ["async_start_discovery", "async_stop_discovery", "async_discovery_active"]
