@@ -1,14 +1,13 @@
 """Configuration flow"""
 from __future__ import annotations
+
 import logging
-from types import MappingProxyType
-from typing import TypeVar, cast
+from typing import TypeVar
 from urllib.parse import urlparse
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import DiscoveryInfoType
@@ -22,24 +21,18 @@ from homeassistant.const import (
 
 from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
-from reolinkrestapi import Client as RestClient
-from reolinkrestapi.parts.connection import Encryption
-from reolinkapi.typings.discovery import Device as DeviceType
-from reolinkapi.typings.network import ChannelStatus
 from reolinkapi import errors as reo_errors
-
-from .settings import Settings, async_get_settings, async_set_setting
-
-from . import discovery
+from reolinkapi.network import ChannelStatusType
+from reolinkrestapi import Client as RestClient
+from reolinkrestapi.connection import Encryption
 
 from .const import (
     DEFAULT_PREFIX_CHANNEL,
     DOMAIN,
     CONF_USE_HTTPS,
-    CONF_PREFIX_CHANNEL,
-    CONF_CHANNELS,
-    SETTING_DISCOVERY,
-    SETTING_DISCOVERY_STARTUP,
+    OPT_PREFIX_CHANNEL,
+    OPT_CHANNELS,
+    OPT_DISCOVERY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -121,7 +114,7 @@ def _auth_schema(require_password: bool = False, **defaults: UserDataType):
     }
 
 
-def _simple_channels(channels: list[ChannelStatus]):
+def _simple_channels(channels: list[ChannelStatusType]):
     return (
         {channel["channel"]: channel["name"] for channel in channels}
         if channels is not None
@@ -132,11 +125,11 @@ def _simple_channels(channels: list[ChannelStatus]):
 def _channels_schema(channels: dict, **defaults: UserDataType):
     return {
         vol.Required(
-            CONF_PREFIX_CHANNEL,
-            default=defaults.get(CONF_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
+            OPT_PREFIX_CHANNEL,
+            default=defaults.get(OPT_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
         ): bool,
         vol.Required(
-            CONF_CHANNELS, default=defaults.get(CONF_CHANNELS, set(channels.keys()))
+            OPT_CHANNELS, default=defaults.get(OPT_CHANNELS, set(channels.keys()))
         ): cv.multi_select(channels),
     }
 
@@ -149,11 +142,14 @@ def _create_unique_id(
     mac: str | None = None,
 ):
     if uuid is not None:
-        return f"reolink-uid-{uuid}"
-    if device_type is not None and serial is not None:
-        return f"reolink-device-{device_type}-{serial}"
+        return f"uid_{uuid}"
+    uid = "device"
     if mac is not None:
-        return f"reolink-mac-{mac}"
+        uid = +f"_mac_{mac.replace(':', '')}"
+    if device_type is not None and serial is not None:
+        uid += f"_type_{device_type}_ser_{serial}"
+    if len(uid) > 6:
+        return uid
     return None
 
 
@@ -166,72 +162,69 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         super().__init__()
         self.data: UserDataType = None
         self.options: UserDataType = None
-        self._in_discovery = False
 
     async def async_step_user(
         self, user_input: dict[str, any] | None = None
     ) -> FlowResult:
         """Handle the intial step."""
+        if user_input is None and self.init_data is None:
+            return await self.async_step_connection()
 
-        if self.data is None and self.init_data is None:
-            settings: Settings = await async_get_settings(self.hass)
-            dsettings: MappingProxyType = settings.get(SETTING_DISCOVERY, {})
-            if dsettings.get(SETTING_DISCOVERY_STARTUP, True):
-                menu_options = ["connection"]
-                if discovery.async_discovery_active(self.hass):
-                    menu_options.insert(0, "stop_discovery")
-                else:
-                    menu_options.insert(0, "discovery")
-                return self.async_show_menu(
-                    step_id="user",
-                    menu_options=menu_options,
-                    description_placeholders={},
-                )
-            return self.async_step_connection()
-
-        if self._in_discovery:
-            self._in_discovery = False
-            return self.async_show_progress_done(next_step_id="user")
-
-        if self.data is None or not _validate_connection_data(self.data):
-            return await self.async_step_connection(self.data)
+        data = self.data
+        if (
+            (data is None or CONF_HOST not in data)
+            and self.options is not None
+            and OPT_DISCOVERY in self.options
+        ):
+            if data is None:
+                data = {}
+            else:
+                data = self.data.copy()
+            if CONF_HOST not in data and "ip" in self.options[OPT_DISCOVERY]:
+                data[CONF_HOST] = self.options[OPT_DISCOVERY]["ip"]
+        if not _validate_connection_data(data):
+            return await self.async_step_connection(data)
 
         client = RestClient()
         encryption = (
-            Encryption.HTTPS
-            if self.data.get(CONF_USE_HTTPS, False)
-            else Encryption.NONE
+            Encryption.HTTPS if data.get(CONF_USE_HTTPS, False) else Encryption.NONE
         )
         try:
             await client.connect(
-                self.data[CONF_HOST],
-                self.data.get(CONF_PORT, None),
+                data[CONF_HOST],
+                data.get(CONF_PORT, None),
                 encryption=encryption,
             )
-        except Exception:
-            return await self.async_step_connection(
-                self.data, {"base": "unknown exception"}
-            )
+        except Exception:  # pylint: disable=broad-except
+            return await self.async_step_connection(data, {"base": "unknown exception"})
 
+        title = (self.init_data or {}).get("name", "Camera")
         try:
-            if not client.login(
-                self.data.get(CONF_USERNAME, DEFAULT_USERNAME),
-                self.data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
+            if not await client.login(
+                data.get(CONF_USERNAME, DEFAULT_USERNAME),
+                data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
             ):
+                if (
+                    data.get(CONF_USERNAME, DEFAULT_USERNAME) == DEFAULT_USERNAME
+                    and data.get(CONF_PASSWORD, DEFAULT_PASSWORD) == DEFAULT_PASSWORD
+                ):
+                    data.pop(CONF_USERNAME, None)
+                    data.pop(CONF_PASSWORD, None)
                 errors = None
-                if CONF_USERNAME in self.data:
+                if CONF_USERNAME in data:
                     errors = {"base": "invalid-auth"}
-                return await self.async_step_auth(self.data, errors)
+                return await self.async_step_auth(data, errors)
 
             abilities = await client.get_ability(
-                self.data.get(CONF_USERNAME, DEFAULT_USERNAME)
+                data.get(CONF_USERNAME, DEFAULT_USERNAME)
             )
-            if abilities["devInfo"]["ver"]:
+            if abilities.devInfo:
                 devinfo = await client.get_device_info()
+                title: str = devinfo.get("name", title)
                 if self.unique_id is None:
-                    if abilities["p2p"]["ver"]:
+                    if abilities.p2p:
                         p2p = await client.get_p2p()
-                    if abilities["localLink"]["ver"]:
+                    if abilities.localLink:
                         link = await client.get_local_link()
                     unique_id = _create_unique_id(
                         uuid=p2p["uid"] if p2p is not None else None,
@@ -247,36 +240,46 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     channels = await client.get_channel_status()
                     if channels is not None:
                         self.context["channels"] = _simple_channels(channels)
-                        if (
-                            self.options is None
-                            or not CONF_CHANNELS in self.options.keys()
-                        ):
-                            return await self.async_step_channels(self.options)
+                        if self.options is None or OPT_CHANNELS not in self.options:
+                            return await self.async_step_channels(self.options, {})
 
         except reo_errors.ReolinkConnectionError:
             errors = {"base": "cannot_connect"}
-            return await self.async_step_connection(self.data, errors)
+            return await self.async_step_connection(data, errors)
         except reo_errors.ReolinkTimeoutError:
             errors = {"base": "timeout"}
-            return await self.async_step_connection(self.data, errors)
-        except reo_errors.ReolinkResponseError:
-            errors = {"base": "invalid_auth"}
-            return await self.async_step_auth(self.data, errors)
-        except Exception:
-            return await self.async_step_connection(self.data, {"base": "unknown"})
+            return await self.async_step_connection(data, errors)
+        except reo_errors.ReolinkResponseError as resp_error:
+            if resp_error.code == reo_errors.ErrorCodes.AUTH_REQUIRED:
+                errors = {"base": "invalid-auth"}
+                return await self.async_step_auth(data, errors)
+            _LOGGER.exception(
+                "An internal device error occurred on %s, configuration aborting",
+                self.data[CONF_HOST],
+            )
+            return self.async_abort(reason="device_error")
+        except Exception:  # pylint: disable=broad-except
+            # we want to "cleanly" fail as possible
+            _LOGGER.exception("Unhanled exception occurred")
+            return await self.async_step_connection(data, {"base": "unknown"})
         finally:
             await client.disconnect()
 
-        return self.async_create_entry(
-            title=self.context["name"], data=self.data, options=self.options
-        )
+        if (
+            self.options is not None
+            and OPT_DISCOVERY in self.options
+            and "ip" in self.options[OPT_DISCOVERY]
+            and data.get(CONF_HOST, None) == self.options[OPT_DISCOVERY]["ip"]
+        ):
+            # if we used discovery for host we wont keep in data so we fall back on discovery everytime
+            data.pop(CONF_HOST, None)
+
+        return self.async_create_entry(title=title, data=data, options=self.options)
 
     async def async_step_integration_discovery(
         self, discovery_info: DiscoveryInfoType
     ) -> FlowResult:
-        device = cast(DeviceType, discovery_info)
-        if "ip" in device:
-            self.data = {CONF_HOST: device["ip"], CONF_USERNAME: DEFAULT_USERNAME}
+        device = discovery_info
         unique_id = _create_unique_id(
             uuid=device.get("uuid", None), mac=device.get("mac")
         )
@@ -285,33 +288,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
         if "name" in device:
             self.context["title_placeholders"] = {"name": device["name"]}
-        return await super().async_step_integration_discovery(discovery_info)
 
-    async def async_step_stop_discovery(
-        self,
-        *_,
-    ):
-        """Stop Discovery"""
-        discovery.async_stop_discovery(self.hass)
-        return await self.async_step_user()
+        if self.options is None:
+            self.options = {}
+        self.options[OPT_DISCOVERY] = discovery_info
+        return await super().async_step_integration_discovery(discovery_info)
 
     async def async_step_discovery(
         self, discovery_info: DiscoveryInfoType
     ) -> FlowResult:
-        if discovery_info is None:
-            settings: Settings = await async_get_settings(self.hass)
-            dsettings: MappingProxyType = settings.get(SETTING_DISCOVERY, {})
-            if dsettings.get(SETTING_DISCOVERY_STARTUP, True):
-                if not SETTING_DISCOVERY in settings:
-                    await async_set_setting(
-                        settings, SETTING_DISCOVERY, {SETTING_DISCOVERY_STARTUP: True}
-                    )
-                elif not SETTING_DISCOVERY_STARTUP in dsettings:
-                    await async_set_setting(dsettings, SETTING_DISCOVERY_STARTUP, True)
-                discovery.async_start_discovery(self.hass)
-                return self.async_abort(reason="discovery_started")
-        self._in_discovery = True
-        return await super().async_step_discovery(discovery_info)
+        if discovery_info is not None:
+            await self._async_handle_discovery_without_unique_id()
+            return self.async_show_progress_done(next_step_id="user")
+
+        return super().async_step_discovery(discovery_info)
 
     async def async_step_connection(
         self,
@@ -329,11 +319,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self.data = user_input
                 return await self.async_step_user()
 
-        schema = vol.Schema(_connection_schema(**(user_input or {})))
+        schema = _connection_schema(**(user_input or {}))
 
         return self.async_show_form(
             step_id="connection",
-            data_schema=schema,
+            data_schema=vol.Schema(schema),
             errors=errors,
             description_placeholders={},
         )
@@ -355,7 +345,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="auth",
-            data_schema=schema,
+            data_schema=vol.Schema(schema),
             errors=errors,
             description_placeholders={},
         )
@@ -368,6 +358,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Channels form"""
 
         if user_input is not None and errors is None:
+            if not self.options:
+                self.options = {}
+            self.options.update(user_input)
             return await self.async_step_user()
 
         schema = _channels_schema(
@@ -376,7 +369,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="channels",
-            data_schema=schema,
+            data_schema=vol.Schema(schema),
             errors=errors,
             description_placeholders={},
         )

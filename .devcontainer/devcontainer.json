@@ -2,7 +2,12 @@
   "name": "Home Assistant Dev",
   "context": "..",
   "dockerFile": "Dockerfile",
-  "postCreateCommand": "/usr/src/core/script/setup",
+  "build": {
+    "args": {
+      "VARIANT": "0-3.10"
+    }
+  },
+  "postCreateCommand": "./.devcontainer/postCreateCommand.sh",
   "postStartCommand": "/usr/src/core/script/bootstrap",
   "containerEnv": {
     "DEVCONTAINER": "1"
@@ -14,6 +19,10 @@
   "runArgs": [
     "-e",
     "GIT_EDITOR=code --wait"
+  ],
+  "mounts": [
+    "source=${localWorkspaceFolder}/../reolink_discovery,target=${containerWorkspaceFolder}/../reolink_discovery,type=bind,consistency=cached",
+    "source=${localWorkspaceFolder}/../../api,target=${containerWorkspaceFolder}/../api,type=bind,consistency=cached"
   ],
   "extensions": [
     "ms-python.vscode-pylance",

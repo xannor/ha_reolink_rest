@@ -5,12 +5,7 @@
     "step": {
       "user": {
         "title": "Initializing...",
-        "description": "",
-        "menu_options": {
-          "stop_discovery": "Stop Discovery",
-          "discovery": "Attempt Discovery",
-          "connection": "Manual Setup"
-        }
+        "description": ""
       },
       "connection": {
         "title": "Connect to device",
@@ -43,8 +38,7 @@
       "channel_required": "Channel selection is required"
     },
     "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
-      "discovery_started": "The discovery process has been started and you should see discovered devices showing up in your device list shortly. If no devices show up after a few seconds, check your firewall settings."
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
     }
   },
   "options": {
