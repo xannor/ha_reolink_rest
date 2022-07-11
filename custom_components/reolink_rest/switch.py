@@ -1,0 +1,1 @@
+"""Reolink Switch Platform"""

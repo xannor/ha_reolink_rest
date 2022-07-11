@@ -19,6 +19,7 @@ OPT_PREFIX_CHANNEL: Final = "prefix_channel"
 OPT_MOTION_INTERVAL: Final = "motion_interval"
 
 DATA_COORDINATOR: Final = "coordinator"
+DATA_ONVIF: Final = "onvif"
 
 # keep? ---\/
 

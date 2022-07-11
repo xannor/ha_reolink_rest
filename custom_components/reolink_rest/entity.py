@@ -1,11 +1,12 @@
 """Reolink Entities"""
 from __future__ import annotations
+import asyncio
 
-from dataclasses import dataclass, field
 from datetime import timedelta
 import logging
 
-from typing import TYPE_CHECKING, Literal, Mapping, cast
+from typing import TYPE_CHECKING, cast
+import async_timeout
 from homeassistant.core import HomeAssistant, callback
 from homeassistant import config_entries
 from homeassistant.helpers.update_coordinator import (
@@ -15,8 +16,9 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.helpers.debounce import Debouncer
 from homeassistant.helpers import device_registry
-from homeassistant.helpers.entity import DeviceInfo, EntityDescription
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.util import dt
 
 from homeassistant.const import (
     CONF_SCAN_INTERVAL,
@@ -34,9 +36,10 @@ from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
 from reolinkrestapi import Client as ReolinkClient
 from reolinkrestapi.connection import Encryption
 
+from .models import EntityData, ChannelMotionData, ReolinkEntityDescription
+
 from .const import (
     CONF_USE_HTTPS,
-    DATA_COORDINATOR,
     DEFAULT_MOTION_INTERVAL,
     DEFAULT_PORT,
     DEFAULT_SCAN_INTERVAL,
@@ -46,24 +49,6 @@ from .const import (
     OPT_MOTION_INTERVAL,
     OPT_PREFIX_CHANNEL,
 )
-
-
-@dataclass
-class ChannelMotionData:
-    """Reolink Motion Data"""
-
-    motion: bool = field(default=False)
-    detected: dict[ai.AITypes, bool] = field(default_factory=dict)
-
-
-@dataclass
-class EntityData:
-    """Reolink Base Entity Data"""
-
-    abilities: system.abilities.Abilities
-    device_info: system.DeviceInfoType
-    channels: dict[int, DeviceInfo]
-    ports: network.NetworkPortsType
 
 
 def async_get_poll_interval(config_entry: config_entries.ConfigEntry):
@@ -218,11 +203,13 @@ class ReolinkDataUpdateCoordinator(DataUpdateCoordinator[EntityData]):
         return motion
 
     async def _async_update_data(self):
+        first_run = False
         if not self._client and not self.hass.is_stopping:
+            first_run = True
             self._client = ReolinkClient()
             self.config_entry.async_on_unload(self._config_entry_unload)
 
-        if not self._client.is_connected:
+        if not self._client.is_connected or self.last_exception is ConfigEntryNotReady:
             host = self.config_entry.data.get(CONF_HOST, None)
             discovery: dict = self.config_entry.options.get(OPT_DISCOVERY, None)
             if host is None and discovery and "ip" in discovery:
@@ -244,13 +231,31 @@ class ReolinkDataUpdateCoordinator(DataUpdateCoordinator[EntityData]):
                 encryption=encryption,
             )
 
-        if not self._client.is_authenticated:
-            if not await self._client.login(
-                self.config_entry.data.get(CONF_USERNAME, DEFAULT_USERNAME),
-                self.config_entry.data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
-            ):
-                await self._client.disconnect()
-                raise ConfigEntryAuthFailed()
+        if (
+            not self._client.is_authenticated
+            or self.last_exception is ConfigEntryAuthFailed
+        ):
+
+            async def _auth():
+                if not await self._client.login(
+                    self.config_entry.data.get(CONF_USERNAME, DEFAULT_USERNAME),
+                    self.config_entry.data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
+                ):
+                    await self._client.disconnect()
+                    raise ConfigEntryAuthFailed()
+
+            if first_run:
+                try:
+                    async with async_timeout.timeout(5):
+                        await _auth()
+                except asyncio.TimeoutError:
+                    self.logger.info(
+                        "Camera is not responding quickly on first load so delaying"
+                    )
+                    await self._client.disconnect()
+                    raise
+            else:
+                await _auth()
 
         commands = []
         data = self.data
@@ -265,8 +270,8 @@ class ReolinkDataUpdateCoordinator(DataUpdateCoordinator[EntityData]):
             except ReolinkResponseError as reoresp:
                 if reoresp.code == ErrorCodes.AUTH_REQUIRED:
                     await self._client.disconnect()
-                    raise ConfigEntryAuthFailed() from reoresp
-                raise ConfigEntryNotReady() from reoresp
+                    raise ConfigEntryAuthFailed()
+                raise ConfigEntryNotReady()
         else:
             commands.append(
                 system.GetAbilitiesCommand(
@@ -274,6 +279,9 @@ class ReolinkDataUpdateCoordinator(DataUpdateCoordinator[EntityData]):
                 )
             )
 
+        time = data.time if data else None
+        drift = data.drift if data else None
+        commands.append(system.GetTimeCommand())
         device_info = data.device_info if data else None
         channels = None
         channel_info = data.channels if data else {}
@@ -293,56 +301,73 @@ class ReolinkDataUpdateCoordinator(DataUpdateCoordinator[EntityData]):
             uuid = discovery["uuid"] if discovery and "uuid" in discovery else None
             if abilities.p2p:
                 commands.append(network.GetP2PCommand())
-        if self._update_motion:
+        if self._update_motion or self._motion_coordinator.update_interval is None:
             motion: dict[int, ChannelMotionData] = {}
             (_, md_index) = self._add_motion_commands(commands, abilities)
         else:
             motion = None
 
         idx = 0
-        async for response in self._client.batch(commands):
-            if system.GetAbilitiesCommand.is_response(response):
-                abilities = system.abilities.Abilities(
-                    system.GetAbilitiesCommand.get_value(response)
-                )
-            if network.GetNetworkPortsCommand.is_response(response):
-                ports = network.GetNetworkPortsCommand.get_value(response)
-            if system.GetDeviceInfoCommand.is_response(response):
-                device_info = system.GetDeviceInfoCommand.get_value(response)
-            if network.GetChannelStatusCommand.is_response(response):
-                channels = network.GetChannelStatusCommand.get_value(response)
-            if network.GetLocalLinkCommand.is_response(response):
-                _mac = network.GetLocalLinkCommand.get_value(response)["mac"]
-                if not mac:
-                    mac = _mac
-                elif mac.lower() != _mac.lower():
-                    raise UpdateFailed("Found different mac so possible wrong device")
-            if network.GetP2PCommand.is_response(response):
-                _uuid = network.GetP2PCommand.get_value(response)["uid"]
-                if not uuid:
-                    uuid = _uuid
-                elif uuid.lower() != _uuid.lower():
-                    raise UpdateFailed(
-                        "Did not find the same device as last time at this address!"
+        try:
+            async for response in self._client.batch(commands):
+                if system.GetAbilitiesCommand.is_response(response):
+                    abilities = system.abilities.Abilities(
+                        system.GetAbilitiesCommand.get_value(response)
                     )
-            if alarm.GetMotionStateCommand.is_response(response):
-                state = alarm.GetMotionStateCommand.get_value(response)
-                channel = md_index[idx]
-                motion.setdefault(channel, ChannelMotionData()).motion = bool(state)
-            if ai.GetAiStateCommand.is_response(response):
-                state = ai.GetAiStateCommand.get_value(response)
-                channel = state["channel"]  # pylint: disable=unsubscriptable-object
-                if ai.AITypes.is_ai_response_values(state):
-                    for (_type, value) in state.items():
-                        if (
-                            isinstance(value, dict)
-                            and value["support"]
-                            and _type in (e.value for e in ai.AITypes)
-                        ):
-                            motion.setdefault(channel, ChannelMotionData()).detected[
-                                ai.AITypes(_type)
-                            ] = bool(value["alarm_state"])
-            idx += 1
+                if system.GetTimeCommand.is_response(response):
+                    result = system.GetTimeCommand.get_value(response)
+                    # pylint: disable=unsubscriptable-object
+                    time = system.as_dateime(
+                        result["Time"], tzinfo=system.get_tzinfo(result)
+                    )
+                    drift = dt.utcnow() - dt.as_utc(time)
+                if network.GetNetworkPortsCommand.is_response(response):
+                    ports = network.GetNetworkPortsCommand.get_value(response)
+                if system.GetDeviceInfoCommand.is_response(response):
+                    device_info = system.GetDeviceInfoCommand.get_value(response)
+                if network.GetChannelStatusCommand.is_response(response):
+                    channels = network.GetChannelStatusCommand.get_value(response)
+                if network.GetLocalLinkCommand.is_response(response):
+                    _mac = network.GetLocalLinkCommand.get_value(response)["mac"]
+                    if not mac:
+                        mac = _mac
+                    elif mac.lower() != _mac.lower():
+                        raise UpdateFailed(
+                            "Found different mac so possible wrong device"
+                        )
+                if network.GetP2PCommand.is_response(response):
+                    _uuid = network.GetP2PCommand.get_value(response)["uid"]
+                    if not uuid:
+                        uuid = _uuid
+                    elif uuid.lower() != _uuid.lower():
+                        raise UpdateFailed(
+                            "Did not find the same device as last time at this address!"
+                        )
+                if alarm.GetMotionStateCommand.is_response(response):
+                    state = alarm.GetMotionStateCommand.get_value(response)
+                    channel = md_index[idx]
+                    motion.setdefault(channel, ChannelMotionData()).motion = bool(state)
+                if ai.GetAiStateCommand.is_response(response):
+                    state = ai.GetAiStateCommand.get_value(response)
+                    channel = state["channel"]  # pylint: disable=unsubscriptable-object
+                    if ai.AITypes.is_ai_response_values(state):
+                        for (_type, value) in state.items():
+                            if (
+                                isinstance(value, dict)
+                                and value["support"]
+                                and _type in (e.value for e in ai.AITypes)
+                            ):
+                                motion.setdefault(
+                                    channel, ChannelMotionData()
+                                ).detected[ai.AITypes(_type)] = bool(
+                                    value["alarm_state"]
+                                )
+                idx += 1
+        except ReolinkResponseError as reoresp:
+            if reoresp.code == ErrorCodes.AUTH_REQUIRED:
+                await self._client.disconnect()
+                raise ConfigEntryAuthFailed()
+            raise ConfigEntryNotReady()
 
         if device_info and device_info.get("channelNum", 0) > 1 and channels is None:
             channels = await self._client.get_channel_status()
@@ -421,22 +446,11 @@ class ReolinkDataUpdateCoordinator(DataUpdateCoordinator[EntityData]):
                 self.config_entry, options=options
             )
 
+        self.async_request_refresh
         self._update_motion = False
         if motion:
             self._motion_coordinator.async_set_updated_data(motion)
-        return EntityData(abilities, device_info, channel_info, ports)
-
-
-ReolinkDomainData = Mapping[
-    str, Mapping[Literal["coordinator"], ReolinkDataUpdateCoordinator]
-]
-
-
-@dataclass
-class ReolinkEntityDescription(EntityDescription):
-    """Describe Reolink Entity"""
-
-    channel: int = 0
+        return EntityData(time, drift, abilities, device_info, channel_info, ports)
 
 
 class ReolinkEntity(CoordinatorEntity[ReolinkDataUpdateCoordinator]):

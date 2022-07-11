@@ -14,7 +14,7 @@ if [ -f "../api/rest/pyproject.toml" ]; then
     python -m pip install -e .
     cd "$CWD"
 fi
-if [ -f "../reolink_discovery/hacs.json"]; then
+if [ -f "../reolink_discovery/hacs.json" ]; then
     cd custom_components
     ln -s ../../reolink_discovery/custom_components/reolink_discovery reolink_discovery
 fi

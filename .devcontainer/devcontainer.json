@@ -7,16 +7,22 @@
       "VARIANT": "0-3.10"
     }
   },
+  "initializeCommand": "./.devcontainer/initializeCommand.sh",
   "postCreateCommand": "./.devcontainer/postCreateCommand.sh",
   "postStartCommand": "/usr/src/core/script/bootstrap",
   "containerEnv": {
     "DEVCONTAINER": "1"
   },
+  "remoteEnv": {
+    "INTERNAL_URL": "http://${containerEnv:DOCKER_HOST_IP}:8123"
+  },
   "appPort": [
-    8123,
+    "8123:8123",
     "3000:3000/udp"
   ],
   "runArgs": [
+    "--env-file",
+    ".devcontainer/devcontainer.env",
     "-e",
     "GIT_EDITOR=code --wait"
   ],

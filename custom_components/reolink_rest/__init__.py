@@ -1,26 +1,25 @@
 """ Reolink Intergration """
 
 from __future__ import annotations
-from dataclasses import asdict
+
 import logging
 from typing import Callable, Final
 
-from homeassistant.core import HomeAssistant, Event
+from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry, SOURCE_INTEGRATION_DISCOVERY
-from homeassistant.helpers.typing import ConfigType, UNDEFINED
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.discovery import async_listen
 from homeassistant.helpers.discovery_flow import async_create_flow
 from homeassistant.helpers.typing import DiscoveryInfoType
-from homeassistant.helpers.event import async_track_point_in_utc_time
-from homeassistant.util.dt import utcnow
 from homeassistant.const import Platform
 
 from .entity import (
-    ReolinkDomainData,
     async_get_motion_poll_interval,
     async_get_poll_interval,
     ReolinkDataUpdateCoordinator,
 )
+
+from .typing import ReolinkDomainData
 
 from .const import (
     DATA_COORDINATOR,
@@ -33,14 +32,9 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: Final = [Platform.CAMERA, Platform.BINARY_SENSOR]
 
-_DATA_DISC_UPDT = "discovery_update"
-
 
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Setup ReoLink Component"""
-
-    domain_data: dict = hass.data.setdefault(DOMAIN, {})
-    # seen: set[str] = domain_data.setdefault(DISCOVERY_EVENT, set())
 
     async def _discovery(service: str, info: DiscoveryInfoType):
         if service == DISCOVERY_EVENT:
@@ -51,13 +45,22 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
                     if not key in discovery or not key in info:
                         key = "mac"
                     if key in discovery and key in info and discovery[key] == info[key]:
-                        entry_data = domain_data.get(entry.entry_id, None)
-                        if entry_data:
-                            __cb: Callable[[DiscoveryInfoType], None] = entry_data.get(
-                                _DATA_DISC_UPDT, None
-                            )
-                            if __cb:
-                                __cb(info)
+                        if next(
+                            (
+                                True
+                                for k in info
+                                if k not in discovery or discovery[k] != info[k]
+                            ),
+                            False,
+                        ):
+                            options = entry.options.copy()
+                            options[OPT_DISCOVERY] = discovery = discovery.copy()
+                            discovery.update(info)
+
+                            if not hass.config_entries.async_update_entry(
+                                entry, options=options
+                            ):
+                                _LOGGER.warning("Could not update options")
                         return
 
             async_create_flow(
@@ -85,12 +88,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         motion_update_interval=async_get_motion_poll_interval(entry),
     )
 
-    def _update_discovery(info: DiscoveryInfoType):
-        pass
-
     domain_data[entry.entry_id] = {
         DATA_COORDINATOR: coordinator,
-        _DATA_DISC_UPDT: _update_discovery,
     }
     await coordinator.async_config_entry_first_refresh()
 

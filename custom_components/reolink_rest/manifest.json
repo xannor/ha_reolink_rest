@@ -9,7 +9,7 @@
     "git+https://github.com/xannor/py_reolinkrestapi.git@main#reolinkrestapi"
   ],
   "dependencies": ["camera"],
-  "after_dependencies": ["stream", "onvif", "webhook", "reolink_discovery"],
+  "after_dependencies": ["stream", "webhook", "reolink_discovery"],
   "codeowners": ["@xannor"],
   "config_flow": true
 }

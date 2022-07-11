@@ -10,7 +10,6 @@ from typing import Final
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.loader import async_get_integration, IntegrationNotFound
 
 from homeassistant.components.camera import (
     Camera,
@@ -29,9 +28,10 @@ from reolinkapi.const import IntStreamTypes as StreamTypes
 from .entity import (
     ReolinkDataUpdateCoordinator,
     ReolinkEntity,
-    ReolinkDomainData,
     ReolinkEntityDescription,
 )
+
+from .typing import ReolinkDomainData
 
 from .const import DATA_COORDINATOR, DOMAIN
 
@@ -122,10 +122,7 @@ async def async_setup_entry(
 
     coordinator = domain_data[config_entry.entry_id][DATA_COORDINATOR]
 
-    try:
-        stream = not (await async_get_integration(hass, "stream")).disabled
-    except IntegrationNotFound:
-        stream = False
+    stream = "stream" in hass.config.components
 
     entities: list[ReolinkCamera] = []
     data = coordinator.data

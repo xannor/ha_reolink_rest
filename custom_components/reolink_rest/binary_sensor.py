@@ -1,14 +1,19 @@
 """Reolink Binary Sensor Platform"""
 
 from __future__ import annotations
+
 from dataclasses import asdict, dataclass
+from datetime import timedelta
 import logging
-from re import A
 from typing import Final
 
-from homeassistant.core import HomeAssistant
+from aiohttp.web import Request
+
+from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.util import dt
 
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
@@ -18,16 +23,23 @@ from homeassistant.components.binary_sensor import (
 
 from reolinkapi.ai import AITypes
 
+from .push import async_get_push_manager, async_parse_notification
+
+from .webhook import async_get_webhook_manager
+
 from .entity import (
     ReolinkDataUpdateCoordinator,
-    ReolinkDomainData,
     ReolinkEntityDescription,
     ReolinkMotionEntity,
 )
 
+from .typing import ReolinkDomainData
+
 from .const import DATA_COORDINATOR, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+
+DATA_MOTION_DEBOUNCE: Final = "onvif_motion_debounce"
 
 
 @dataclass
@@ -72,6 +84,46 @@ SENSORS: Final = [
     ),
 ]
 
+MOTION_DEBOUCE: Final = timedelta(seconds=2)
+
+DATA_STORAGE: Final = "onvif_storage"
+
+
+async def _handle_onvif_notify(hass: HomeAssistant, request: Request):
+    motion = await async_parse_notification(request)
+    if motion is None:
+        return None
+
+    # the motion event is fairly useless since it is just a motion changed "somwhere"
+    # and not an explicit this is or is not detecting motion
+    # it sometimes will send a IsMotion false but not always realiably so instead
+    # we will "debounce" a final refresh request for
+    domain_data: ReolinkDomainData = hass.data[DOMAIN]
+    entry_data = domain_data[request["entry_id"]]
+    _ed: dict = entry_data
+    _cb: CALLBACK_TYPE = _ed.pop(DATA_MOTION_DEBOUNCE, None)
+    if _cb:
+        _cb()
+
+    # ideally we would get better notices from onvif, but since we only know
+    # motion is/was happening we have to poll for any detail
+
+    async def _try_again(*_):
+        _ed.pop(DATA_MOTION_DEBOUNCE, None)
+        await entry_data[DATA_COORDINATOR].motion_coordinator.async_request_refresh()
+
+    if motion != "false":
+        _ed[DATA_MOTION_DEBOUNCE] = async_track_point_in_utc_time(
+            hass, _try_again, dt.utcnow() + MOTION_DEBOUCE
+        )
+
+    # hand off refresh to task so we dont hold the hook too long
+    hass.create_task(
+        entry_data[DATA_COORDINATOR].motion_coordinator.async_request_refresh()
+    )
+
+    return None
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -82,14 +134,26 @@ async def async_setup_entry(
 
     _LOGGER.debug("Setting up motion")
     domain_data: ReolinkDomainData = hass.data[DOMAIN]
-    coordinator = domain_data[config_entry.entry_id][DATA_COORDINATOR]
+    entry_data = domain_data[config_entry.entry_id]
+    coordinator = entry_data[DATA_COORDINATOR]
 
     entities = []
     data = coordinator.data
+    push_setup = not data.abilities.onvif
+
     for channel in data.channels.keys():
         ability = coordinator.data.abilities.channels[channel]
         if not ability.alarm.motion:
             continue
+
+        if not push_setup:
+            push_setup = True
+            webhook = async_get_webhook_manager(hass, _LOGGER, config_entry)
+            if webhook:
+                config_entry.async_on_unload(
+                    webhook.async_add_handler(_handle_onvif_notify)
+                )
+                push = async_get_push_manager(hass, _LOGGER, config_entry, webhook)
 
         ai_types = []
         # if ability.support.ai: <- in my tests this ability was not set
