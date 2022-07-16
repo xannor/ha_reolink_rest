@@ -3,20 +3,22 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Final
+from typing import Final
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry, SOURCE_INTEGRATION_DISCOVERY
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.discovery import async_listen
 from homeassistant.helpers.discovery_flow import async_create_flow
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.typing import DiscoveryInfoType
 from homeassistant.const import Platform
 
 from .entity import (
     async_get_motion_poll_interval,
     async_get_poll_interval,
-    ReolinkDataUpdateCoordinator,
+    create_channel_motion_data_update_method,
+    create_device_data_update_method,
 )
 
 from .typing import ReolinkDomainData
@@ -75,25 +77,39 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up ReoLink Device from a config entry."""
 
-    domain_data: dict = hass.data.setdefault(DOMAIN, {})
     _LOGGER.debug("Setting up entry")
 
     entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
 
-    coordinator = ReolinkDataUpdateCoordinator(
-        hass,
-        _LOGGER,
-        name=f"Reolink-Api-Poller-{entry.entry_id}",
-        update_interval=async_get_poll_interval(entry),
-        motion_update_interval=async_get_motion_poll_interval(entry),
-    )
+    domain_data: ReolinkDomainData = hass.data.setdefault(DOMAIN, {})
 
-    domain_data[entry.entry_id] = {
-        DATA_COORDINATOR: coordinator,
-    }
+    entry_data = domain_data.setdefault(entry.entry_id, {})
+    coordinator = entry_data.get("coordinator", None)
+    # if setup fails we do not want to recreate the coordinators
+    if coordinator is None:
+        coordinator = DataUpdateCoordinator(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}-DataUpdateCoordinator-{entry.entry_id}",
+            update_interval=async_get_poll_interval(entry),
+            update_method=create_device_data_update_method(entry_data),
+        )
+        entry_data["coordinator"] = coordinator
+    motion_coordinator = entry_data.get("motion_coordinator", None)
+    if motion_coordinator is None:
+        motion_coordinator = DataUpdateCoordinator(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}-Motion-DataUpdateCooridator-{entry.entry_id}",
+            update_interval=async_get_motion_poll_interval(entry),
+            update_method=create_channel_motion_data_update_method(entry_data),
+        )
+        entry_data["motion_coordinator"] = motion_coordinator
+        entry_data["motion_data_request"] = set()
     await coordinator.async_config_entry_first_refresh()
 
-    hass.config_entries.async_setup_platforms(entry, PLATFORMS)
+    for platform in PLATFORMS:
+        await hass.config_entries.async_forward_entry_setup(entry, platform)
 
     return True
 
@@ -118,16 +134,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
 
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        domain_data: ReolinkDomainData = hass.data.get(DOMAIN, None)
+        if domain_data:
+            entry_data = domain_data.pop(entry.entry_id, None)
+            if entry_data:
+                client = entry_data.pop("client", None)
+                if client:
+                    try:
+                        await client.disconnect()
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.exception("Error ocurred while cleaning up entry")
 
     return unload_ok
-
-
-async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry):
-    """Cleanup removed entries (so they can be rediscovered)"""
-
-    discovery_info: dict = entry.options.get(OPT_DISCOVERY, None)
-    if not discovery_info:
-        return
-
-    # TODO: "re-discover" discovered entry

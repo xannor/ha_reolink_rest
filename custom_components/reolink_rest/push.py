@@ -5,37 +5,38 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import asdict
+from datetime import timedelta
 import hashlib
 
 import logging
-import re
 from typing import Final, TypeVar, overload
 
 import secrets
 
 from xml.etree import ElementTree as et
 
-from aiohttp import ClientSession, TCPConnector
-from aiohttp.web import Request, Response
+from aiohttp import ClientSession, TCPConnector, client_exceptions
+from aiohttp.web import Request
 
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.loader import bind_hass
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt
 
 from homeassistant.backports.enum import StrEnum
 
-from homeassistant.const import CONF_HOST, CONF_PORT, CONF_USERNAME, CONF_PASSWORD
+from homeassistant.const import CONF_HOST, CONF_USERNAME, CONF_PASSWORD
 import isodate
 
-from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
+from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
-from .const import DATA_COORDINATOR, DOMAIN, OPT_DISCOVERY
+from .const import DOMAIN, OPT_DISCOVERY
 
-from .models import PushSubscription
-from .typing import ReolinkDataUpdateCoordinator, WebhookManager
+from .models import DeviceData, PushSubscription
+from .typing import ReolinkDomainData, ReolinkEntryData, WebhookManager
 
 DATA_MANAGER: Final = "push_manager"
 DATA_STORE: Final = "push_store"
@@ -45,121 +46,107 @@ STORE_VERSION: Final = 1
 
 class _Namespaces(StrEnum):
 
-    soapenv = "http://www.w3.org/2003/05/soap-envelope"
-    wsnt = "http://docs.oasis-open.org/wsn/b-2"
-    wsa = "http://www.w3.org/2005/08/addressing"
-    wsse = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
-    wsu = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
-    tt = "http://www.onvif.org/ver10/schema"
+    SOAP_ENV = "http://www.w3.org/2003/05/soap-envelope"
+    WSNT = "http://docs.oasis-open.org/wsn/b-2"
+    WSA = "http://www.w3.org/2005/08/addressing"
+    WSSE = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+    WSU = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
+    TT = "http://www.onvif.org/ver10/schema"
+
+    def tag(self, name: str):
+        """Create ElementTree tag"""
+        return f"{{{self.value}}}{name}"
 
 
-class _Actions(StrEnum):
+def _create_envelope(body: et.Element, *headers: et.Element):
+    envelope = et.Element(_Namespaces.SOAP_ENV.tag("Envelope"))
+    if headers:
+        _headers = et.SubElement(envelope, _Namespaces.SOAP_ENV.tag("Header"))
+        for header in headers:
+            _headers.append(header)
+    et.SubElement(envelope, _Namespaces.SOAP_ENV.tag("Body")).append(body)
+    return envelope
 
-    subscribe = (
-        "http://docs.oasis-open.org/wsn/bw-2/NotificationProducer/SubscribeRequest"
+
+def _create_wsse(*, username: str, password: str):
+    wsse = et.Element(
+        _Namespaces.WSSE.tag("Security"),
+        {_Namespaces.SOAP_ENV.tag("mustUnderstand"): "true"},
     )
-    renew = "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest"
-    unsubscribe = (
-        "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest"
-    )
-
-
-SOAP: Final = f"""<soapenv:Envelope xmlns:soapenv="{_Namespaces.soapenv}">
-{{header}}
-<soapenv:Body>{{body}}</soapenv:Body>
-</soapenv:Envelope>"""
-
-SOAP_HEADER: Final = "<soapenv:Header>{header}</soapenv:Header>"
-
-CONF_NONCE: Final = "nonce"
-
-CONF_CREATED: Final = "created"
-
-WSS_SECURITY: Final = f"""<wsse:Security soap:mustUnderstand="true" xmlns:wsse="{_Namespaces.wsse}" xmlns:wsu="{_Namespaces.wsu}">
-<wsse:UsernameToken>
-<wsse:Username>{{{CONF_USERNAME}}}</wsse:Username>
-<wsse:Password Type="http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest">{{{CONF_PASSWORD}_digest}}</wsse:Password>
-<wsse:Nonce>{{{CONF_NONCE}}}</wsse:Nonce>
-<wsu:Created>{{{CONF_CREATED}}}</wsu:Created>
-</wsse:UsernameToken>
-</wsse:Security>"""
-
-CONF_ADDRESS: Final = "address"
-
-CONF_EXPIRES: Final = "expires"
-
-_NO_LIST: Final[list[str]] = []
-
-ACTION_BODY: Final = {
-    _Actions.subscribe: (
-        _NO_LIST,
-        f"""<wsnt:Subscribe xmlns:wsnt="{_Namespaces.wsnt}">
-    <wsnt:ConsumerReference>
-        <wsa:Address xmlns:wsa="{_Namespaces.wsa}">{{{CONF_ADDRESS}}}</wsa:Address>
-    </wsnt:ConsumerReference>
-    <wsnt:InitialTerminationTime>{{{CONF_EXPIRES}}}</wsnt:InitialTerminationTime>
-</wsnt:Subscribe>""",
-    ),
-    _Actions.renew: (
-        [
-            f"""<wsa:Action xmlns:wsa="{_Namespaces.wsa}">{_Actions.unsubscribe}</wsa:Action>""",
-            f"""<wsa:To xmlns:wsa="{_Namespaces.wsa}">{{{CONF_ADDRESS}}}</wsa:To>""",
-        ],
-        f"""<wsnt:Renew xmlns:wsnt="{_Namespaces.wsnt}">
-<wsnt:TerminationTime>{{{CONF_EXPIRES}}}</wsnt:TerminationTime>
-</wsnt:Renew>""",
-    ),
-    _Actions.unsubscribe: (
-        [
-            f"""<wsa:Action xmlns:wsa="{_Namespaces.wsa}">{_Actions.unsubscribe}</wsa:Action>""",
-            f"""<wsa:To xmlns:wsa="{_Namespaces.wsa}">{{{CONF_ADDRESS}}}</wsa:To>""",
-        ],
-        f"""<wsnt:Unsubscribe xmlns:wsnt="{_Namespaces.wsnt}"/>""",
-    ),
-}
-
-EVENT_SERVICE: Final = f"http://{{{CONF_HOST}}}:{{{CONF_PORT}}}/onvif/event_service"
-
-DEFAULT_EXPIRES: Final = "P1D"
-
-
-def _prepare_map(coordinator: ReolinkDataUpdateCoordinator):
-    data = coordinator.config_entry.data.copy()
-    if CONF_HOST not in data:
-        data[CONF_HOST] = coordinator.config_entry.options[OPT_DISCOVERY]["ip"]
-    data[CONF_PORT] = coordinator.data.ports["onvifPort"]
-    if not CONF_USERNAME in data:
-        data[CONF_USERNAME] = DEFAULT_USERNAME
-    if not CONF_PASSWORD in data:
-        data[CONF_PASSWORD] = DEFAULT_PASSWORD
+    _token = et.SubElement(wsse, _Namespaces.WSSE.tag("UsernameToken"))
+    et.SubElement(_token, _Namespaces.WSSE.tag("Username")).text = username
 
     created = dt.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
     nonce = secrets.token_bytes(16)
     digest = hashlib.sha1()
-    digest.update(
-        nonce + created.encode("utf-8") + str(data[CONF_PASSWORD]).encode("utf-8")
+    digest.update(nonce + created.encode("utf-8") + str(password).encode("utf-8"))
+    et.SubElement(
+        _token,
+        _Namespaces.WSSE.tag("Password"),
+        {
+            "Type": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest"
+        },
+    ).text = base64.b64encode(digest.digest()).decode("utf-8")
+    et.SubElement(_token, _Namespaces.WSSE.tag("Nonce")).text = base64.b64encode(
+        nonce
+    ).decode("utf-8")
+    et.SubElement(_token, _Namespaces.WSU.tag("Created")).text = created
+
+    return wsse
+
+
+def _create_subscribe(
+    address: str, expires: timedelta = None
+) -> tuple[str, list[et.Element], et.Element]:
+    subscribe = et.Element(_Namespaces.WSNT.tag("Subscribe"))
+    et.SubElement(
+        et.SubElement(subscribe, _Namespaces.WSNT.tag("ConsumerReference")),
+        _Namespaces.WSA.tag("Address"),
+    ).text = address
+    if expires is not None:
+        et.SubElement(
+            subscribe, _Namespaces.WSNT.tag("InitialTerminationTime")
+        ).text = isodate.duration_isoformat(expires)
+    return (
+        "http://docs.oasis-open.org/wsn/bw-2/NotificationProducer/SubscribeRequest",
+        [],
+        subscribe,
     )
-    data[CONF_CREATED] = created
-    data[f"{CONF_PASSWORD}_digest"] = base64.b64encode(digest.digest()).decode("utf-8")
-    data[CONF_NONCE] = base64.b64encode(nonce).decode("utf-8")
-
-    return data
 
 
-def _build_soap(action: _Actions, __map: dict):
-    body = ACTION_BODY[action]
-    soap = {"body": body[1].format_map(__map), "header": ""}
-    headers = []
-    if CONF_USERNAME in __map:
-        wsse = WSS_SECURITY.format_map(__map)
-        headers.append(wsse)
-    if body[0]:
-        headers.extend((tmpl.format_map(__map) for tmpl in body[0]))
-    if headers:
-        soap["header"] = SOAP_HEADER.format_map({"header": "".join(headers)})
+def _create_renew(manager: str, new_expires: timedelta = None):
+    _ACTION: Final = (
+        "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest"
+    )
+    renew = et.Element(_Namespaces.WSNT.tag("Renew"))
+    if new_expires is not None:
+        et.SubElement(
+            renew, _Namespaces.WSNT.tag("TerminationTime")
+        ).text = isodate.duration_isoformat(new_expires)
 
-    return SOAP.format_map(soap)
+    headers = [et.Element(_Namespaces.WSA.tag("Action"))]
+    headers[0].text = _ACTION
+    headers.append(et.Element(_Namespaces.WSA.tag("To")))
+    headers[1].text = manager
+    return (_ACTION, headers, renew)
 
+
+def _create_unsubscribe(manager: str):
+    _ACTION: Final = (
+        "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest"
+    )
+    unsubscribe = et.Element(_Namespaces.WSNT.tag("Unsubscribe"))
+
+    headers = [et.Element(_Namespaces.WSA.tag("Action"))]
+    headers[0].text = _ACTION
+    headers.append(et.Element(_Namespaces.WSA.tag("To")))
+    headers[1].text = manager
+    return (_ACTION, headers, unsubscribe)
+
+
+EVENT_SERVICE: Final = "/onvif/event_service"
+
+DEFAULT_EXPIRES: Final = timedelta(days=1)
 
 _T = TypeVar("_T")
 _VT = TypeVar("_VT")
@@ -200,6 +187,19 @@ def _text(*elements: et.Element):
     return _e.text
 
 
+def _process_error_response(response: et.Element):
+    fault = _find(f".//{_Namespaces.SOAP_ENV.tag('Fault')}", response)
+    code = _find(
+        _Namespaces.SOAP_ENV.tag("Value"),
+        _find(_Namespaces.SOAP_ENV.tag("Code"), fault),
+    )
+    reason = _find(
+        _Namespaces.SOAP_ENV.tag("Text"),
+        _find(_Namespaces.SOAP_ENV.tag("Reason"), fault),
+    )
+    return (_text(code), _text(reason))
+
+
 class PushManager:
     """Push Manager"""
 
@@ -208,28 +208,39 @@ class PushManager:
         logger: logging.Logger,
         url: str,
         storage: Store,
-        coordinator: ReolinkDataUpdateCoordinator,
+        entry_id: str,
     ) -> None:
         self._logger = logger
         self._url = url
         self._storage = storage
-        self._coordinator = coordinator
         self._subscription: PushSubscription = None
         self._renew_task = None
+        self._entry_id = entry_id
+        self._motion_interval: timedelta = None
 
     async def async_start(self):
         """start up manager"""
         data = await self._storage.async_load()
-        entry_id = self._coordinator.config_entry.entry_id
-        if isinstance(data, dict) and entry_id in data:
-            self._subscription = PushSubscription(**data[entry_id])
+        if isinstance(data, dict) and self._entry_id in data:
+            self._subscription = PushSubscription(**data[self._entry_id])
             # if we retrieve a sub we must have crashed so we will
             # "renew" it incase the camera was reset inbetween
-        await self._subscribe()
+
+        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        entry_data = domain_data[self._entry_id]
+        await self._subscribe(entry_data)
 
     async def async_stop(self):
         """shutdown manager"""
-        await self._unsubscribe()
+        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        entry_data = domain_data[self._entry_id]
+        await self._unsubscribe(entry_data)
+
+    async def async_reftresh(self):
+        """force refresh of manage incase device state changed"""
+        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        entry_data = domain_data[self._entry_id]
+        self._renew(entry_data)
 
     async def _store_subscription(self):
         data = await self._storage.async_load()
@@ -240,67 +251,106 @@ class PushManager:
         else:
             sub = None
 
-        entry_id = self._coordinator.config_entry.entry_id
         if isinstance(data, dict):
-            if not sub and entry_id in data:
-                data.pop(entry_id)
+            if not sub and self._entry_id in data:
+                data.pop(self._entry_id)
             else:
-                data[entry_id] = sub
+                data[self._entry_id] = sub
         elif sub:
-            data = {entry_id: sub}
+            data = {self._entry_id: sub}
         if data is not None:
             await self._storage.async_save(data)
 
     async def _send(self, url: str, headers, data):
 
+        async with ClientSession(connector=TCPConnector(verify_ssl=False)) as client:
+            self._logger.debug("sending data")
+
+            headers.setdefault("content-type", "application/soap+xml;charset=UTF-8")
+            async with client.post(
+                url, data=data, headers=headers, allow_redirects=False
+            ) as response:
+                if "xml" not in response.content_type:
+                    self._logger.warning("bad response")
+                    return None
+
+                text = await response.text()
+                return (response.status, et.fromstring(text))
+
+    def _get_onvif_base(self, config_entry: ConfigEntry, device_data: DeviceData):
+        discovery: dict = config_entry.options.get(OPT_DISCOVERY, {})
+        host = config_entry.data.get(CONF_HOST, discovery.get("ip", None))
+        return f"http://{host}:{device_data.ports['onvifPort']}"
+
+    def _get_service_url(self, config_entry: ConfigEntry, device_data: DeviceData):
+        return self._get_onvif_base(config_entry, device_data) + EVENT_SERVICE
+
+    def _get_wsse(self, config_entry: ConfigEntry):
+        return _create_wsse(
+            username=config_entry.data.get(CONF_USERNAME, DEFAULT_USERNAME),
+            password=config_entry.data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
+        )
+
+    def _handle_failed_subscription(
+        self,
+        coordinator: DataUpdateCoordinator,
+        entry_data: ReolinkEntryData,
+        save: bool,
+    ):
+        def _retry():
+            cleanup()
+            self._storage.hass.create_task(self._subscribe(entry_data, save))
+
+        cleanup = coordinator.async_add_listener(_retry)
+
+        if self._motion_interval:
+            entry_data["motion_coordinator"].update_interval = self._motion_interval
+            self._motion_interval = None
+
+    async def _subscribe(self, entry_data: ReolinkEntryData, save: bool = True):
+        await self._unsubscribe(entry_data, False)
+
+        coordinator = entry_data["coordinator"]
+
+        wsse = self._get_wsse(coordinator.config_entry)
+        message = _create_subscribe(self._url)
+
+        headers = {"action": message[0]}
+
+        data = _create_envelope(message[2], wsse, *message[1])
+        response = None
         try:
-            async with ClientSession(
-                connector=TCPConnector(verify_ssl=False)
-            ) as client:
-                self._logger.debug("sending data")
-
-                headers.setdefault("content-type", "application/soap+xml;charset=UTF-8")
-                async with client.post(
-                    url, data=data, headers=headers, allow_redirects=False
-                ) as response:
-                    if "xml" not in response.content_type:
-                        self._logger.warning("bad response")
-                        return None
-
-                    text = await response.text()
-                    return (response.status, et.fromstring(text))
-
-        except Exception as e:
+            response = await self._send(
+                self._get_service_url(coordinator.config_entry, coordinator.data),
+                headers,
+                et.tostring(data),
+            )
+        except client_exceptions.ServerDisconnectedError:
             raise
-
-    async def _subscribe(self, save: bool = True):
-        await self._unsubscribe(False)
-
-        data_map = _prepare_map(self._coordinator)
-        data_map[CONF_ADDRESS] = self._url
-        data_map[CONF_EXPIRES] = DEFAULT_EXPIRES
-
-        url = EVENT_SERVICE.format_map(data_map)
-
-        headers = {"action": _Actions.subscribe.value}
-        data = _build_soap(_Actions.subscribe, data_map)
-        response = await self._send(url, headers, data)
         if response is None:
             return
 
         status, response = response
         if status != 200:
+            (code, reason) = _process_error_response(response)
+
             # error respons is kinda useless so we just assume
             self._logger.warning(
-                f"Camera ({self._coordinator.data.device_info['name']}) refused subscription request, probably needs a reboot."
+                f"Camera ({coordinator.data.device_info['name']}) refused subscription request, probably needs a reboot."
             )
+            self._handle_failed_subscription(coordinator, entry_data, save)
             return
 
-        response = response.find(f".//{{{_Namespaces.wsnt}}}SubscribeResponse")
-        reference = _find(f"{{{_Namespaces.wsnt}}}SubscriptionReference", response)
-        reference = _text(_find(f"{{{_Namespaces.wsa}}}Address", reference), reference)
-        time = _text(_find(f"{{{_Namespaces.wsnt}}}CurrentTime", response))
-        expires = _text(_find(f"{{{_Namespaces.wsnt}}}TerminationTime", response))
+        response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
+        await self._process_subscription(response, entry_data, save)
+
+    async def _process_subscription(
+        self, response: et.Element, entry_data: ReolinkEntryData, save: bool = True
+    ):
+        reference = _find(_Namespaces.WSNT.tag("SubscriptionReference"), response)
+        reference = _text(_find(_Namespaces.WSA.tag("Address"), reference), reference)
+        time = _text(_find(_Namespaces.WSNT.tag("CurrentTime"), response))
+        expires = _text(_find(_Namespaces.WSNT.tag("TerminationTime"), response))
         if not reference or not time:
             return
 
@@ -319,82 +369,110 @@ class PushManager:
         expires = expires - time if expires else None
 
         self._subscription = PushSubscription(reference, time, expires)
+        if self._motion_interval is None:
+            coordinator = entry_data["motion_coordinator"]
+            self._motion_interval = coordinator.update_interval
+            coordinator.update_interval = None
+
+        self._schedule_renew(entry_data, asyncio.get_event_loop())
 
         if save:
             await self._store_subscription()
 
-    async def _renew(self, save: bool = True):
+    async def _renew(self, entry_data: ReolinkEntryData, save: bool = True):
         sub = self._subscription
         if sub and not sub.expires:
             return
 
+        coordinator = entry_data["coordinator"]
+
         if sub and sub.expires:
-            data = self._coordinator.data
+            data = coordinator.data
             camera_now = dt.utcnow() + data.drift
             expires = sub.timestamp + sub.expires
             if (expires - camera_now).total_seconds() < 1:
-                return await self._subscribe(save)
+                return await self._subscribe(entry_data, save)
 
         if not sub:
-            return await self._subscribe(save)
+            return await self._subscribe(entry_data, save)
 
-        data_map = _prepare_map(self._coordinator)
-        url = f"http://{{{CONF_HOST}}}:{{{CONF_PORT}}}".format_map(data_map)
-        url += sub.manager_url
+        url = (
+            self._get_onvif_base(coordinator.config_entry, coordinator.data)
+            + sub.manager_url
+        )
 
-        data_map[CONF_ADDRESS] = url
-        url = EVENT_SERVICE.format_map(data_map)
+        wsse = self._get_wsse(coordinator.config_entry)
+        message = _create_renew(url)
 
-        headers = {"action": _Actions.renew.value}
-        data = _build_soap(_Actions.renew, data_map)
-        response = await self._send(url, headers, data)
+        headers = {"action": message[0]}
+        data = _create_envelope(message[2], wsse, *message[1])
+        response = await self._send(
+            self._get_service_url(coordinator.config_entry, coordinator.data),
+            headers,
+            et.tostring(data),
+        )
         if not response:
             return
 
         status, response = response
         if status != 200:
+            (code, reason) = _process_error_response(response)
+
             # error respons is kinda useless so we just assume
             self._logger.warning(
-                f"Camera ({self._coordinator.data.device_info['name']}) refused subscription renewal, probably was rebooted."
+                f"Camera ({coordinator.data.device_info['name']}) refused subscription renewal, probably was rebooted."
             )
+            self._handle_failed_subscription(coordinator, entry_data, save)
             return
 
-        response = response.find(f".//{{{_Namespaces.wsnt}}}SubscribeResponse")
+        response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
+        await self._process_subscription(response, entry_data, save)
 
-        if save:
-            await self._store_subscription()
-
-    async def _unsubscribe(self, save: bool = True):
+    async def _unsubscribe(self, entry_data: ReolinkEntryData, save: bool = True):
         sub = self._subscription
         if not sub:
             return
 
         self._cancel_renew()
 
+        coordinator = entry_data["coordinator"]
+
         send = True
         if sub.expires:
-            data = self._coordinator.data
+            data = coordinator.data
             camera_now = dt.utcnow() + data.drift
             expires = sub.timestamp + sub.expires
             send = (expires - camera_now).total_seconds() > 1
 
         # no need to unsubscribe an expiring/expired subscription
         if send:
-            data_map = _prepare_map(self._coordinator)
-            url = f"http://{{{CONF_HOST}}}:{{{CONF_PORT}}}".format_map(data_map)
+            url = self._get_onvif_base(coordinator.config_entry, coordinator.data)
             url += sub.manager_url
 
-            data_map[CONF_ADDRESS] = url
-            url = EVENT_SERVICE.format_map(data_map)
+            wsse = self._get_wsse(coordinator.config_entry)
+            message = _create_unsubscribe(url)
 
-            headers = {"action": _Actions.unsubscribe.value}
-            data = _build_soap(_Actions.unsubscribe, data_map)
-            response = await self._send(url, headers, data)
+            headers = {"action": message[0]}
+            data = _create_envelope(message[2], wsse, *message[2])
+            response = None
+            try:
+                response = await self._send(
+                    self._get_service_url(coordinator.config_entry, coordinator.data),
+                    headers,
+                    et.tostring(data),
+                )
+            except client_exceptions.ServerDisconnectedError:
+                # this could mean our subscription is invalid for now log and ignore
+                self._logger.warning(
+                    "Got disconnected on attempt to unsubscribe, assuming invalid subscription"
+                )
+
             if response is None:
                 return
 
             status, response = response
             if status != 200:
+                (code, reason) = _process_error_response(response)
                 self._logger.warning("bad response")
 
         self._subscription = None
@@ -406,19 +484,21 @@ class PushManager:
             self._renew_task.cancel()
         self._renew_task = None
 
-    def _schedule_renew(self, loop: asyncio.AbstractEventLoop):
+    def _schedule_renew(
+        self, entry_data: ReolinkEntryData, loop: asyncio.AbstractEventLoop
+    ):
         self._cancel_renew()
         sub = self._subscription
         if not sub or not sub.expires:
             return
 
-        data = self._coordinator.data
+        data = entry_data["coordinator"].data
         camera_now = dt.utcnow() + data.drift
         expires = sub.timestamp + sub.expires
         delay = max((expires - camera_now).total_seconds(), 0)
 
         def _task():
-            loop.create_task(self._renew())
+            loop.create_task(self._renew(entry_data))
 
         self._renew_task = loop.call_later(delay, _task)
 
@@ -431,18 +511,18 @@ async def async_parse_notification(request: Request):
 
     text = await request.text()
     env = et.fromstring(text)
-    if env is None or env.tag != f"{{{_Namespaces.soapenv}}}Envelope":
+    if env is None or env.tag != f"{{{_Namespaces.SOAP_ENV}}}Envelope":
         return None
 
-    notify = env.find(f".//{{{_Namespaces.wsnt}}}Notify")
+    notify = env.find(f".//{{{_Namespaces.WSNT}}}Notify")
     if notify is None:
         return None
 
-    data = notify.find(f".//{{{_Namespaces.tt}}}Data")
+    data = notify.find(f".//{{{_Namespaces.TT}}}Data")
     if data is None:
         return None
 
-    motion = data.find(f'{{{_Namespaces.tt}}}SimpleItem[@Name="IsMotion"][@Value]')
+    motion = data.find(f'{{{_Namespaces.TT}}}SimpleItem[@Name="IsMotion"][@Value]')
     if motion is None:
         return None
 
@@ -470,7 +550,7 @@ def async_get_push_manager(
     )
 
     entry_data[DATA_MANAGER] = manager = PushManager(
-        logger, webhook.url, storage, entry_data[DATA_COORDINATOR]
+        logger, webhook.url, storage, entry.entry_id
     )
 
     def _unload():

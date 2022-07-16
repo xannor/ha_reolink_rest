@@ -3,11 +3,9 @@
   "name": "Reolink IP Device",
   "documentation": "https://github.com/xannor/ha_reolink_rest",
   "issue_tracker": "https://github.com/xannor/ha_reolink_rest/issues",
-  "version": "0.0.2",
+  "version": "0.5.0",
   "iot_class": "local_polling",
-  "requirements": [
-    "git+https://github.com/xannor/py_reolinkrestapi.git@main#reolinkrestapi"
-  ],
+  "requirements": ["async-reolink.rest==0.5.5"],
   "dependencies": ["camera"],
   "after_dependencies": ["stream", "webhook", "reolink_discovery"],
   "codeowners": ["@xannor"],

@@ -21,14 +21,14 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
 )
 
-from reolinkapi.ai import AITypes
+from async_reolink.api.ai import AITypes
 
 from .push import async_get_push_manager, async_parse_notification
 
 from .webhook import async_get_webhook_manager
 
 from .entity import (
-    ReolinkDataUpdateCoordinator,
+    ReolinkEntityDataUpdateCoordinator,
     ReolinkEntityDescription,
     ReolinkMotionEntity,
 )
@@ -56,30 +56,36 @@ SENSORS: Final = [
     ReolinkMotionSensorEntityDescription(
         key="motion_general",
         name="Motion",
+        has_entity_name=True,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_animal",
         name="Animal",
+        has_entity_name=True,
         ai_type=AITypes.ANIMAL,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_face",
         name="Face",
+        has_entity_name=True,
         ai_type=AITypes.FACE,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_person",
         name="Person",
+        has_entity_name=True,
         ai_type=AITypes.PEOPLE,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_pet",
         name="Pet",
+        has_entity_name=True,
         ai_type=AITypes.PET,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_vehicle",
         name="Vehicle",
+        has_entity_name=True,
         ai_type=AITypes.VEHICLE,
     ),
 ]
@@ -110,7 +116,7 @@ async def _handle_onvif_notify(hass: HomeAssistant, request: Request):
 
     async def _try_again(*_):
         _ed.pop(DATA_MOTION_DEBOUNCE, None)
-        await entry_data[DATA_COORDINATOR].motion_coordinator.async_request_refresh()
+        await entry_data["motion_coordinator"].async_request_refresh()
 
     if motion != "false":
         _ed[DATA_MOTION_DEBOUNCE] = async_track_point_in_utc_time(
@@ -118,9 +124,7 @@ async def _handle_onvif_notify(hass: HomeAssistant, request: Request):
         )
 
     # hand off refresh to task so we dont hold the hook too long
-    hass.create_task(
-        entry_data[DATA_COORDINATOR].motion_coordinator.async_request_refresh()
-    )
+    hass.create_task(entry_data["motion_coordinator"].async_request_refresh())
 
     return None
 
@@ -186,7 +190,7 @@ class ReolinkMotionSensor(ReolinkMotionEntity, BinarySensorEntity):
 
     def __init__(
         self,
-        coordinator: ReolinkDataUpdateCoordinator,
+        coordinator: ReolinkEntityDataUpdateCoordinator,
         description: ReolinkMotionSensorEntityDescription,
         context: any = None,
     ) -> None:
@@ -194,10 +198,18 @@ class ReolinkMotionSensor(ReolinkMotionEntity, BinarySensorEntity):
         ReolinkMotionEntity.__init__(self, coordinator, description, context)
 
     def _handle_coordinator_motion_update(self) -> None:
-        data = self.coordinator.motion_coordinator.data[self.entity_description.channel]
+        data = self.motion_coordinator.data.channel[self.entity_description.channel]
         if self.entity_description.ai_type is None:
             self._attr_is_on = data.motion
         else:
             self._attr_is_on = data.detected.get(self.entity_description.ai_type, False)
 
         return super()._handle_coordinator_motion_update()
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "update_method": "push"
+            if self.motion_coordinator.update_interval is None
+            else "poll"
+        }

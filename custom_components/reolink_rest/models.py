@@ -2,11 +2,12 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Mapping, Sequence
 
 from homeassistant.helpers.entity import DeviceInfo, EntityDescription
 from homeassistant.util import dt
 
-from reolinkapi import system, network, ai
+from async_reolink.api import system, network, ai
 
 
 @dataclass
@@ -21,11 +22,11 @@ class ChannelMotionData:
     """Reolink Motion Data"""
 
     motion: bool = field(default=False)
-    detected: dict[ai.AITypes, bool] = field(default_factory=dict)
+    detected: Mapping[ai.AITypes, bool] = field(default_factory=dict)
 
 
 @dataclass
-class EntityData:
+class DeviceData:
     """Reolink Base Entity Data"""
 
     time: datetime
@@ -34,6 +35,14 @@ class EntityData:
     device_info: system.DeviceInfoType
     channels: dict[int, DeviceInfo]
     ports: network.NetworkPortsType
+
+
+@dataclass
+class MotionData:
+    """Reolink Base Motion Data"""
+
+    updated: frozenset[int]
+    channel: Mapping[int, ChannelMotionData]
 
 
 @dataclass(frozen=True)

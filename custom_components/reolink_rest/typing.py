@@ -1,45 +1,30 @@
 """Common Typings"""
 
-from typing import Generic, Literal, Mapping, Protocol, TypeVar
+from typing import Protocol, TypeVar, TypedDict
 
 from aiohttp.web import Request, Response
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, CALLBACK_TYPE
-from reolinkrestapi import Client
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.device_registry import DeviceEntry
+from async_reolink.rest import Client
 
-from .models import EntityData, ChannelMotionData
+from .models import DeviceData, MotionData
 
 _T = TypeVar("_T")
 
 
-class _DataUpdateCoordinator(Protocol, Generic[_T]):
+class ReolinkEntryData(TypedDict, total=False):
+    """Reolink Entry Data"""
 
-    config_entry: ConfigEntry
-    data: _T
-
-    async def async_request_refresh(self) -> None:
-        """Request a refresh.
-
-        Refresh will wait a bit to see if it can batch them.
-        """
+    client: Client
+    device: DeviceEntry
+    coordinator: DataUpdateCoordinator[DeviceData]
+    motion_coordinator: DataUpdateCoordinator[MotionData]
+    motion_data_request: set[int]
 
 
-class ReolinkDataUpdateCoordinator(_DataUpdateCoordinator[EntityData]):
-    """Reolink Data Update Coordinator like"""
-
-    @property
-    def client(self) -> Client:
-        """Active Client"""
-
-    @property
-    def motion_coordinator(self) -> _DataUpdateCoordinator[ChannelMotionData]:
-        """Motion Cooridnator"""
-
-
-ReolinkDomainData = Mapping[
-    str, Mapping[Literal["coordinator"], ReolinkDataUpdateCoordinator]
-]
+ReolinkDomainData = dict[str, ReolinkEntryData]
 
 
 class AsyncWebhookHandler(Protocol):

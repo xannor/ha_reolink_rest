@@ -19,12 +19,12 @@ from homeassistant.const import (
     CONF_PASSWORD,
 )
 
-from reolinkapi.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
+from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
-from reolinkapi import errors as reo_errors
-from reolinkapi.network import ChannelStatusType
-from reolinkrestapi import Client as RestClient
-from reolinkrestapi.connection import Encryption
+from async_reolink.api import errors as reo_errors
+from async_reolink.api.network import ChannelStatusType
+from async_reolink.rest import Client as RestClient
+from async_reolink.rest.connection import Encryption
 
 from .const import (
     DEFAULT_PREFIX_CHANNEL,

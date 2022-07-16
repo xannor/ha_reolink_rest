@@ -19,14 +19,14 @@ from homeassistant.components.camera import (
 
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
-from reolinkapi.system import abilities
+from async_reolink.api.system import abilities
 
-from reolinkapi.errors import ReolinkResponseError
+from async_reolink.api.errors import ReolinkResponseError
 
-from reolinkapi.const import IntStreamTypes as StreamTypes
+from async_reolink.api.const import IntStreamTypes as StreamTypes
 
 from .entity import (
-    ReolinkDataUpdateCoordinator,
+    ReolinkEntityDataUpdateCoordinator,
     ReolinkEntity,
     ReolinkEntityDescription,
 )
@@ -64,46 +64,64 @@ CAMERAS: Final = [
         _STREAM,
         [
             ReolinkCameraEntityDescription(
-                "camera_rtmp_main", name="RTMP Main", output_type=OutputStreamTypes.RTMP
+                "camera_rtmp_main",
+                name="RTMP Main",
+                output_type=OutputStreamTypes.RTMP,
+                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtmp_sub",
                 name="RTMP Sub",
                 output_type=OutputStreamTypes.RTMP,
                 stream_type=StreamTypes.SUB,
+                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtmp_ext",
                 name="RTMP Extra",
                 output_type=OutputStreamTypes.RTMP,
                 stream_type=StreamTypes.EXT,
+                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
-                "camera_rtsp_main", name="RTSP Main", output_type=OutputStreamTypes.RTSP
+                "camera_rtsp_main",
+                name="RTSP Main",
+                output_type=OutputStreamTypes.RTSP,
+                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtsp_sub",
                 name="RTSP Sub",
                 output_type=OutputStreamTypes.RTSP,
                 stream_type=StreamTypes.SUB,
+                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtsp_ext",
                 name="RTSP Extra",
                 output_type=OutputStreamTypes.RTSP,
                 stream_type=StreamTypes.EXT,
+                has_entity_name=True,
             ),
         ],
     ),
     (
         _NO_FEATURE,
         [
-            ReolinkCameraEntityDescription("camera_mjpeg_main", name="Snapshot Main"),
             ReolinkCameraEntityDescription(
-                "camera_mjpeg_sub", name="Snapshot Sub", stream_type=StreamTypes.SUB
+                "camera_mjpeg_main", name="Snapshot Main", has_entity_name=True
             ),
             ReolinkCameraEntityDescription(
-                "camera_mjpeg_ext", name="Snapshot Extra", stream_type=StreamTypes.EXT
+                "camera_mjpeg_sub",
+                name="Snapshot Sub",
+                stream_type=StreamTypes.SUB,
+                has_entity_name=True,
+            ),
+            ReolinkCameraEntityDescription(
+                "camera_mjpeg_ext",
+                name="Snapshot Extra",
+                stream_type=StreamTypes.EXT,
+                has_entity_name=True,
             ),
         ],
     ),
@@ -194,7 +212,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
 
     def __init__(
         self,
-        coordinator: ReolinkDataUpdateCoordinator,
+        coordinator: ReolinkEntityDataUpdateCoordinator,
         supported_features: CameraEntityFeature,
         description: ReolinkCameraEntityDescription,
         context: any = None,
@@ -205,26 +223,38 @@ class ReolinkCamera(ReolinkEntity, Camera):
         self._snapshot_task: Task[bytes | None] = None
 
     async def stream_source(self) -> str | None:
+        domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
+        client = domain_data[self.coordinator.config_entry.entry_id]["client"]
+
         if self.entity_description.output_type == OutputStreamTypes.RTSP:
-            url = await self.coordinator.client.get_rtsp_url(
-                self.entity_description.channel, self.entity_description.stream_type
-            )
+            try:
+                url = await client.get_rtsp_url(
+                    self.entity_description.channel, self.entity_description.stream_type
+                )
+            except Exception:
+                self.hass.create_task(self.coordinator.async_request_refresh())
+                raise
+
             # rtsp uses separate auth handlers so we have to "inject" the auth with http basic
             idx = url.index("://")
             url = f"{url[:idx+3]}{self.coordinator.config_entry.data[CONF_USERNAME]}:{self.coordinator.config_entry.data[CONF_PASSWORD]}@{url[idx+3:]}"
         elif self.entity_description.output_type == OutputStreamTypes.RTMP:
-            url = await self.coordinator.client.get_rtmp_url(
-                self.entity_description.channel, self.entity_description.stream_type
-            )
+            try:
+                url = await client.get_rtmp_url(
+                    self.entity_description.channel, self.entity_description.stream_type
+                )
+            except Exception:
+                self.hass.create_task(self.coordinator.async_request_refresh())
+                raise
         else:
             return await super().stream_source()
         return url
 
     async def _async_camera_image(self):
+        domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
+        client = domain_data[self.coordinator.config_entry.entry_id]["client"]
         try:
-            image = await self.coordinator.client.get_snap(
-                self.entity_description.channel
-            )
+            image = await client.get_snap(self.entity_description.channel)
         except ReolinkResponseError as resperr:
             _LOGGER.exception(
                 "Failed to capture snapshot (%s: %s)", resperr.code, resperr.details
@@ -233,6 +263,9 @@ class ReolinkCamera(ReolinkEntity, Camera):
         except Exception:  # pylint: disable=broad-except
             _LOGGER.exception("Failed to capture snapshot")
             image = None
+        if image is None:
+            # have the coordinator upate on error so we can reconnect or disable
+            self.hass.create_task(self.coordinator.async_request_refresh())
         self._snapshot_task = None
         return image
 
