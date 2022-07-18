@@ -99,7 +99,7 @@ def _add_motion_commands(
 ):
     md_index: dict[int, int] = {}
     if len(abilities.channels) == 1:
-        channels = set(0)
+        channels = set({0})
     elif channels is None or len(channels) == 0:
         channels = _get_channels(abilities, options)
 
@@ -240,13 +240,22 @@ def create_device_data_update_method(entry_data: ReolinkEntryData):
 
             async def _auth():
                 nonlocal auth_id
-                if not await client.login(
-                    config.data.get(CONF_USERNAME, DEFAULT_USERNAME),
-                    config.data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
-                ):
-                    auth_id = 0
-                    await client.disconnect()
-                    raise ConfigEntryAuthFailed()
+                try:
+                    if not await client.login(
+                        config.data.get(CONF_USERNAME, DEFAULT_USERNAME),
+                        config.data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
+                    ):
+                        auth_id = 0
+                        await client.disconnect()
+                        raise ConfigEntryAuthFailed()
+                except ReolinkResponseError as reoresp:
+                    if reoresp.code in (
+                        ErrorCodes.AUTH_REQUIRED,
+                        ErrorCodes.LOGIN_FAILED,
+                    ):
+                        await client.disconnect()
+                        raise ConfigEntryAuthFailed()
+                    raise reoresp
                 auth_id = client.authentication_id
                 if (
                     coordinator.update_interval
@@ -280,7 +289,10 @@ def create_device_data_update_method(entry_data: ReolinkEntryData):
                     config.data.get(CONF_USERNAME, None)
                 )
             except ReolinkResponseError as reoresp:
-                if reoresp.code == ErrorCodes.AUTH_REQUIRED:
+                if reoresp.code in (
+                    ErrorCodes.AUTH_REQUIRED,
+                    ErrorCodes.LOGIN_FAILED,
+                ):
                     await client.disconnect()
                     raise ConfigEntryAuthFailed()
                 if reoresp.code == ErrorCodes.PROTOCOL_ERROR:
@@ -393,7 +405,10 @@ def create_device_data_update_method(entry_data: ReolinkEntryData):
         # except RESPONSE_ERRORS:
         #    raise
         except ReolinkResponseError as reoresp:
-            if reoresp.code == ErrorCodes.AUTH_REQUIRED:
+            if reoresp.code in (
+                ErrorCodes.AUTH_REQUIRED,
+                ErrorCodes.LOGIN_FAILED,
+            ):
                 await client.disconnect()
                 raise ConfigEntryAuthFailed() from reoresp
             raise reoresp

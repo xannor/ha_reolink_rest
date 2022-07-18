@@ -1,6 +1,7 @@
 """ Reolink Intergration """
 
 from __future__ import annotations
+import asyncio
 
 import logging
 from typing import Final
@@ -21,7 +22,7 @@ from .entity import (
     create_device_data_update_method,
 )
 
-from .typing import ReolinkDomainData
+from .typing import ReolinkDomainData, ReolinkEntryData
 
 from .const import (
     DATA_COORDINATOR,
@@ -106,12 +107,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         entry_data["motion_coordinator"] = motion_coordinator
         entry_data["motion_data_request"] = set()
+
     await coordinator.async_config_entry_first_refresh()
 
-    for platform in PLATFORMS:
-        await hass.config_entries.async_forward_entry_setup(entry, platform)
+    hass.async_create_task(async_setup_platforms(hass, entry))
 
     return True
+
+
+async def async_setup_platforms(hass: HomeAssistant, entry: ConfigEntry):
+    """Setup platforms."""
+
+    await asyncio.gather(
+        *[
+            hass.config_entries.async_forward_entry_setup(entry, platform)
+            for platform in PLATFORMS
+        ]
+    )
 
 
 async def _async_entry_updated(hass: HomeAssistant, entry: ConfigEntry):

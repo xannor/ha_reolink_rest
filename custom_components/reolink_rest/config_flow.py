@@ -171,15 +171,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_connection()
 
         data = self.data
+        if data is None:
+            self.data = data = {}
         if (
-            (data is None or CONF_HOST not in data)
+            (CONF_HOST not in data)
             and self.options is not None
             and OPT_DISCOVERY in self.options
         ):
-            if data is None:
-                data = {}
-            else:
-                data = self.data.copy()
+            data = self.data.copy()
             if CONF_HOST not in data and "ip" in self.options[OPT_DISCOVERY]:
                 data[CONF_HOST] = self.options[OPT_DISCOVERY]["ip"]
         if not _validate_connection_data(data):
@@ -212,7 +211,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data.pop(CONF_PASSWORD, None)
                 errors = None
                 if CONF_USERNAME in data:
-                    errors = {"base": "invalid-auth"}
+                    errors = {"base": "invalid_auth"}
                 return await self.async_step_auth(data, errors)
 
             abilities = await client.get_ability(
@@ -250,8 +249,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = {"base": "timeout"}
             return await self.async_step_connection(data, errors)
         except reo_errors.ReolinkResponseError as resp_error:
-            if resp_error.code == reo_errors.ErrorCodes.AUTH_REQUIRED:
-                errors = {"base": "invalid-auth"}
+            if resp_error.code in (
+                reo_errors.ErrorCodes.AUTH_REQUIRED,
+                reo_errors.ErrorCodes.LOGIN_FAILED,
+            ):
+                errors = {"base": "invalid_auth"}
                 return await self.async_step_auth(data, errors)
             _LOGGER.exception(
                 "An internal device error occurred on %s, configuration aborting",
@@ -336,12 +338,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Authentication form"""
 
         if user_input is not None and errors is None:
-            if _validate_connection_data(user_input):
-                user_input = {dslice(user_input, CONF_USERNAME, CONF_PASSWORD)}
-                self.data.update(user_input)
-                return await self.async_step_user()
+            user_input = dict(dslice(user_input, CONF_USERNAME, CONF_PASSWORD))
+            self.data.update(user_input)
+            return await self.async_step_user()
 
-        schema = _auth_schema(errors is not None, **(user_input or self.data))
+        schema = _auth_schema(errors is not None, **(user_input or self.data or {}))
 
         return self.async_show_form(
             step_id="auth",
@@ -349,6 +350,13 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={},
         )
+
+    # async def async_step_reauth(
+    #    self,
+    #    user_input: UserDataType | None = None,
+    #    errors: dict[str, str] | None = None,
+    # ) -> FlowResult:
+    #    """Re-authorize form"""
 
     async def async_step_channels(
         self,
