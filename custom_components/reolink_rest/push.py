@@ -268,7 +268,7 @@ class PushManager:
                 return (response.status, et.fromstring(text))
 
     def _get_onvif_base(self, config_entry: ConfigEntry, device_data: EntityData):
-        if not bool(device_data.ports["onvifEnable"]):
+        if not bool(device_data.ports.get("onvifEnable", True)):
             return None
         discovery: dict = config_entry.options.get(OPT_DISCOVERY, {})
         host = config_entry.data.get(CONF_HOST, discovery.get("ip", None))

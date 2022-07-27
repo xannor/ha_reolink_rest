@@ -269,7 +269,7 @@ async def async_setup_entry(
                         )
                         hass.create_task(_coordinator.async_request_refresh())
                 subscription = None
-                if not bool(coordinator.data.ports["onvifEnable"]):
+                if not bool(coordinator.data.ports.get("onvifEnable", True)):
                     coordinator.logger.warning(
                         "ONVIF not enabled for device %s, forcing polling mode",
                         coordinator.data.device.name,
