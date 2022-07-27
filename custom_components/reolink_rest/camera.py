@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 from enum import IntEnum, IntFlag, auto
 import logging
 from typing import Final
+from urllib.parse import quote
 
 import voluptuous as vol
 
@@ -306,16 +307,21 @@ async def async_setup_entry(
                 description = ReolinkCameraEntityDescription(**asdict(description))
                 description.channel = channel
 
-                if description.stream_type != StreamTypes.MAIN:
+                if description.stream_type == StreamTypes.MAIN:
+                    if not main:
+                        main = description.output_type
+                    else:
+                        description.entity_registry_enabled_default = False
                     if not first:
                         first = description.output_type
-                    description.entity_registry_visible_default = False
-                elif not main:
-                    main = description.output_type
+                else:
                     if not first:
-                        first = main
-                if description.output_type != first:
-                    description.entity_registry_enabled_default = False
+                        first = description.output_type
+                        description.entity_registry_visible_default = False
+                    elif description.output_type != first:
+                        description.entity_registry_enabled_default = False
+                    else:
+                        description.entity_registry_visible_default = False
 
                 entities.append(
                     ReolinkCamera(
@@ -343,6 +349,22 @@ class ReolinkCamera(ReolinkEntity, Camera):
         ReolinkEntity.__init__(self, coordinator, description, context)
         self._attr_supported_features = supported_features
         self._snapshot_task: Task[bytes | None] = None
+        if self.entity_description.output_type == OutputStreamTypes.RTSP and not bool(
+            self.coordinator.data.ports["rtspEnable"]
+        ):
+            self._attr_available = False
+            self.coordinator.logger.error(
+                "RTSP is disabled on device (%s) camera will be unavailable",
+                self.coordinator.data.device.name,
+            )
+        elif self.entity_description.output_type == OutputStreamTypes.RTMP and not bool(
+            self.coordinator.data.ports["rtmpEnable"]
+        ):
+            self._attr_available = False
+            self.coordinator.logger.error(
+                "RTMP is disabled on device (%s) camera will be unavailable",
+                self.coordinator.data.device.name,
+            )
 
     async def stream_source(self) -> str | None:
         domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
@@ -360,8 +382,12 @@ class ReolinkCamera(ReolinkEntity, Camera):
                 raise
 
             # rtsp uses separate auth handlers so we have to "inject" the auth with http basic
+            data = self.coordinator.config_entry.data
+            auth = quote(data[CONF_USERNAME])
+            auth += ":"
+            auth += quote(data[CONF_PASSWORD])
             idx = url.index("://")
-            url = f"{url[:idx+3]}{self.coordinator.config_entry.data[CONF_USERNAME]}:{self.coordinator.config_entry.data[CONF_PASSWORD]}@{url[idx+3:]}"
+            url = f"{url[:idx+3]}{auth}@{url[idx+3:]}"
         elif self.entity_description.output_type == OutputStreamTypes.RTMP:
             try:
                 url = await client.get_rtmp_url(
@@ -411,6 +437,25 @@ class ReolinkCamera(ReolinkEntity, Camera):
 
         return await self._snapshot_task
 
+    @property
+    def available(self) -> bool:
+        if not self._attr_available:
+            return False
+        return super().available
+
+    def _handle_coordinator_update(self) -> None:
+        if self.entity_description.output_type == OutputStreamTypes.RTSP:
+            self._attr_available = bool(self.coordinator.data.ports["rtspEnable"])
+        elif self.entity_description.output_type == OutputStreamTypes.RTMP:
+            self._attr_available = bool(self.coordinator.data.ports["rtmpEnable"])
+        return super()._handle_coordinator_update()
+
     async def async_set_zoom(self, position: int):
+        """Set Zoom"""
         client = self.coordinator.data.client
         await client.set_ptz_zoom(position, self.entity_description.channel)
+
+    async def async_set_focus(self, position: int):
+        """Set Focus"""
+        client = self.coordinator.data.client
+        await client.set_ptz_focus(position, self.entity_description.channel)

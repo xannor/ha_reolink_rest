@@ -461,7 +461,7 @@ class ReolinkEntityData:
             self.updated_motion.add(channel)
             if channel not in self.motion:
                 self.motion.setdefault(channel, MutableMotionData())
-            self.motion[channel].motion = bool(state)
+            self.motion[channel].detected = bool(state)
             return True
         if ai.GetAiStateCommand.is_response(response):
             state = ai.GetAiStateCommand.get_value(response)
@@ -476,7 +476,7 @@ class ReolinkEntityData:
                     ):
                         if channel not in self.motion:
                             self.motion.setdefault(channel, MutableMotionData())
-                        self.motion[channel].detected[ai.AITypes(_type)] = bool(
+                        self.motion[channel][ai.AITypes(_type)] = bool(
                             value["alarm_state"]
                         )
             return True
