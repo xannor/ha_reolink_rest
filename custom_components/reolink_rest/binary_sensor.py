@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 import logging
-from typing import Final
+from typing import Final, cast
 
 from aiohttp.web import Request
 
@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt
 
 from homeassistant.components.binary_sensor import (
@@ -28,14 +29,16 @@ from .push import async_get_push_manager, async_parse_notification
 from .webhook import async_get_webhook_manager
 
 from .entity import (
+    ReolinkEntity,
+    ReolinkEntityData,
     ReolinkEntityDataUpdateCoordinator,
     ReolinkEntityDescription,
-    ReolinkMotionEntity,
+    async_get_motion_poll_interval,
 )
 
 from .typing import ReolinkDomainData
 
-from .const import DATA_COORDINATOR, DOMAIN
+from .const import DATA_COORDINATOR, DATA_MOTION_COORDINATORS, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -114,9 +117,24 @@ async def _handle_onvif_notify(hass: HomeAssistant, request: Request):
     # ideally we would get better notices from onvif, but since we only know
     # motion is/was happening we have to poll for any detail
 
+    async def _refresh():
+        coordinator = entry_data[DATA_COORDINATOR]
+        if not coordinator.last_update_success:
+            return
+        data: ReolinkEntityData = coordinator.data
+        for channel in entry_data[DATA_MOTION_COORDINATORS].keys():
+            data.async_request_motion_update(channel)
+        try:
+            await data.async_update_motion_data()
+        except Exception:  # pylint: disable=broad-except
+            # since we are updating outside a coordinator, we need to handle errors
+            await coordinator.async_request_refresh()
+        for _coordinator in entry_data[DATA_MOTION_COORDINATORS].values():
+            _coordinator.async_set_updated_data(data)
+
     async def _try_again(*_):
         _ed.pop(DATA_MOTION_DEBOUNCE, None)
-        await entry_data["motion_coordinator"].async_request_refresh()
+        await _refresh()
 
     if motion != "false":
         _ed[DATA_MOTION_DEBOUNCE] = async_track_point_in_utc_time(
@@ -124,7 +142,7 @@ async def _handle_onvif_notify(hass: HomeAssistant, request: Request):
         )
 
     # hand off refresh to task so we dont hold the hook too long
-    hass.create_task(entry_data["motion_coordinator"].async_request_refresh())
+    hass.create_task(_refresh())
 
     return None
 
@@ -134,7 +152,35 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ):
-    """Setup camera platform"""
+    """Setup binary_sensor platform"""
+
+    def _setup_hooks(
+        channel: int, motion_coordinator: ReolinkEntityDataUpdateCoordinator
+    ):
+        add_listener = motion_coordinator.async_add_listener
+
+        def _coord_update():
+            if channel in coordinator.data.updated_motion:
+                motion_coordinator.async_set_updated_data(coordinator.data)
+
+        coord_cleanup = None
+
+        def _add_listener(update_callback: CALLBACK_TYPE, context: any = None):
+            nonlocal coord_cleanup
+            # pylint: disable = protected-access
+            if len(motion_coordinator._listeners) == 0:
+                coord_cleanup = coordinator.async_add_listener(_coord_update)
+
+            cleanup = add_listener(update_callback, context)
+
+            def _cleanup():
+                cleanup()
+                if len(motion_coordinator._listeners) == 0:
+                    coord_cleanup()
+
+            return _cleanup
+
+        motion_coordinator.async_add_listener = _add_listener
 
     _LOGGER.debug("Setting up motion")
     domain_data: ReolinkDomainData = hass.data[DOMAIN]
@@ -143,21 +189,34 @@ async def async_setup_entry(
 
     entities = []
     data = coordinator.data
-    push_setup = not data.abilities.onvif
+    push_setup = True
 
     for channel in data.channels.keys():
         ability = coordinator.data.abilities.channels[channel]
         if not ability.alarm.motion:
             continue
 
-        if not push_setup:
-            push_setup = True
-            webhook = async_get_webhook_manager(hass, _LOGGER, config_entry)
-            if webhook:
-                config_entry.async_on_unload(
-                    webhook.async_add_handler(_handle_onvif_notify)
-                )
-                push = async_get_push_manager(hass, _LOGGER, config_entry, webhook)
+        push_setup = False
+        coordinators = entry_data.setdefault(DATA_MOTION_COORDINATORS, {})
+        if channel not in coordinators:
+            motion_coordinator = DataUpdateCoordinator(
+                hass,
+                _LOGGER,
+                name=f"{coordinator.name}-motion",
+                update_interval=async_get_motion_poll_interval(config_entry),
+                update_method=cast(
+                    ReolinkEntityData, coordinator.data
+                ).async_update_motion_data,
+            )
+            coordinators[channel] = motion_coordinator
+            motion_coordinator.data = data
+
+            _setup_hooks(channel, motion_coordinator)
+
+        else:
+            motion_coordinator: ReolinkEntityDataUpdateCoordinator = coordinators[
+                channel
+            ]
 
         ai_types = []
         # if ability.support.ai: <- in my tests this ability was not set
@@ -177,13 +236,59 @@ async def async_setup_entry(
                 continue
             description = ReolinkMotionSensorEntityDescription(**asdict(description))
             description.channel = channel
-            entities.append(ReolinkMotionSensor(coordinator, description))
+            entities.append(ReolinkMotionSensor(motion_coordinator, description))
 
     if entities:
         async_add_entities(entities)
 
+    if not push_setup and data.abilities.onvif:
+        webhooks = async_get_webhook_manager(hass)
+        if webhooks is not None:
+            webhook = webhooks.async_register(hass, config_entry)
+            config_entry.async_on_unload(
+                webhook.async_add_handler(_handle_onvif_notify)
+            )
+            push = async_get_push_manager(hass)
+            subscription = None
 
-class ReolinkMotionSensor(ReolinkMotionEntity, BinarySensorEntity):
+            async def _async_sub():
+                nonlocal subscription
+                subscription = await push.async_subscribe(webhook.url, config_entry)
+                if subscription is not None:
+                    for coordinator in coordinators.values():
+                        coordinator.update_interval = None
+
+            def _sub_failure(entry_id: str):
+                nonlocal subscription
+                if entry_id != config_entry.entry_id:
+                    return
+                if subscription is not None:
+                    for _coordinator in coordinators.values():
+                        _coordinator.update_interval = async_get_motion_poll_interval(
+                            config_entry
+                        )
+                        hass.create_task(_coordinator.async_request_refresh())
+                subscription = None
+
+                def _sub_resub():
+                    cleanup()
+                    hass.create_task(_async_sub())
+
+                cleanup = coordinator.async_add_listener(_sub_resub)
+
+            cleanup = push.async_on_subscription_failure(_sub_failure)
+
+            await _async_sub()
+
+            def _unsubscribe():
+                cleanup()
+                if subscription is not None:
+                    hass.create_task(push.async_unsubscribe(subscription))
+
+            config_entry.async_on_unload(_unsubscribe)
+
+
+class ReolinkMotionSensor(ReolinkEntity, BinarySensorEntity):
     """Reolink Motion Sensor Entity"""
 
     entity_description: ReolinkMotionSensorEntityDescription
@@ -195,21 +300,23 @@ class ReolinkMotionSensor(ReolinkMotionEntity, BinarySensorEntity):
         context: any = None,
     ) -> None:
         BinarySensorEntity.__init__(self)
-        ReolinkMotionEntity.__init__(self, coordinator, description, context)
+        ReolinkEntity.__init__(self, coordinator, description, context)
 
-    def _handle_coordinator_motion_update(self) -> None:
-        data = self.motion_coordinator.data.channel[self.entity_description.channel]
+    def _handle_coordinator_update(self) -> None:
+        data = self.coordinator.data.motion[self.entity_description.channel]
         if self.entity_description.ai_type is None:
-            self._attr_is_on = data.motion
+            self._attr_is_on = data.detected
         else:
-            self._attr_is_on = data.detected.get(self.entity_description.ai_type, False)
+            self._attr_is_on = data.get(self.entity_description.ai_type, False)
+        return super()._handle_coordinator_update()
 
-        return super()._handle_coordinator_motion_update()
+    async def async_update(self) -> None:
+        return await super().async_update()
 
     @property
     def extra_state_attributes(self):
         return {
             "update_method": "push"
-            if self.motion_coordinator.update_interval is None
+            if self.coordinator.update_interval is None
             else "poll"
         }

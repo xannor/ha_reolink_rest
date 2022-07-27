@@ -1,13 +1,14 @@
 """Common Models"""
 
-from dataclasses import dataclass, field
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Mapping, Sequence
+from typing import Mapping, MutableMapping
 
-from homeassistant.helpers.entity import DeviceInfo, EntityDescription
+from homeassistant.helpers.entity import EntityDescription
 from homeassistant.util import dt
 
-from async_reolink.api import system, network, ai
+from async_reolink.api import ai
 
 
 @dataclass
@@ -17,44 +18,110 @@ class ReolinkEntityDescription(EntityDescription):
     channel: int = 0
 
 
-@dataclass
-class ChannelMotionData:
-    """Reolink Motion Data"""
+class MotionData(Mapping[ai.AITypes, bool], ABC):
+    """
+    Motion data
 
-    motion: bool = field(default=False)
-    detected: Mapping[ai.AITypes, bool] = field(default_factory=dict)
+    is true if motion detected, otherwise false, also provides flags for if the motion was ai triggered
+    """
 
-
-@dataclass
-class DeviceData:
-    """Reolink Base Entity Data"""
-
-    time: datetime
-    drift: timedelta
-    abilities: system.abilities.Abilities
-    device_info: system.DeviceInfoType
-    channels: dict[int, DeviceInfo]
-    ports: network.NetworkPortsType
+    @property
+    @abstractmethod
+    def detected(self) -> bool:
+        """detected"""
 
 
-@dataclass
-class MotionData:
-    """Reolink Base Motion Data"""
+class MutableMotionData(MotionData, MutableMapping[ai.AITypes, bool]):
+    """Motion Data"""
 
-    updated: frozenset[int]
-    channel: Mapping[int, ChannelMotionData]
+    def __init__(self) -> None:
+        self._detected: bool = False
+        self._ai: dict[ai.AITypes, bool] = {}
+
+    def __bool__(self):
+        return self._detected
+
+    def __len__(self):
+        return self._ai.__len__()
+
+    def __getitem__(self, __k: ai.AITypes):
+        return self._ai.__getitem__(__k)
+
+    def __setitem__(self, __k: ai.AITypes, __v: bool):
+        return self._ai.__setitem__(__k, __v)
+
+    def __delitem__(self, __v: ai.AITypes):
+        return self._ai.__delitem__(__v)
+
+    def __iter__(self):
+        return self._ai.__iter__()
+
+    def __contains__(self, __o: object):
+        return self._ai.__contains__(__o)
+
+    @property
+    def detected(self):
+        """Detected"""
+        return self._detected
+
+    @detected.setter
+    def detected(self, value: bool):
+        self._detected = value
 
 
-@dataclass(frozen=True)
-class PushSubscription:
-    """Push Subscription Token"""
+class PTZPosition(ABC):
+    """
+    PTZ Position data
 
-    manager_url: str
-    timestamp: datetime
-    expires: timedelta | None
+    also can be used directly as an int
+    """
 
-    def __post_init__(self):
-        if self.timestamp and not isinstance(self.timestamp, datetime):
-            object.__setattr__(self, "timestamp", dt.parse_datetime(self.timestamp))
-        if self.expires and not isinstance(self.expires, timedelta):
-            object.__setattr__(self, "expires", dt.parse_duration(self.expires))
+    @property
+    @abstractmethod
+    def value(self) -> int:
+        """value"""
+
+    def __index__(self):
+        return self.value
+
+
+class MutablePTZPosition(PTZPosition):
+    """PTZ Position"""
+
+    def __init__(self) -> None:
+        self._value = 0
+
+    @property
+    def value(self):
+        return self._value
+
+    @value.setter
+    def value(self, value: int):
+        self._value = value
+
+
+class PTZDisabled(ABC):
+    """PTZ Disabled"""
+
+    @property
+    @abstractmethod
+    def disabled(self) -> bool:
+        """disabled"""
+
+    def __bool__(self):
+        return not self.disabled
+
+
+class MutablePTZDisabled(PTZDisabled):
+    """PTZ Disabled"""
+
+    def __init__(self) -> None:
+        self._value = True
+
+    @property
+    def disabled(self):
+        return self._value
+
+    @disabled.setter
+    def disabled(self, value: bool) -> bool:
+        self._value = value

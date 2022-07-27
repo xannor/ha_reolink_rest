@@ -5,30 +5,27 @@ import asyncio
 
 import logging
 from typing import Final
+import async_timeout
 
-from homeassistant.core import HomeAssistant
-from homeassistant.config_entries import ConfigEntry, SOURCE_INTEGRATION_DISCOVERY
+from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.typing import ConfigType
-from homeassistant.helpers.discovery import async_listen
-from homeassistant.helpers.discovery_flow import async_create_flow
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.helpers.typing import DiscoveryInfoType
+from homeassistant.helpers.service import async_extract_config_entry_ids
 from homeassistant.const import Platform
 
+from .discovery import async_discovery_handler
+
 from .entity import (
-    async_get_motion_poll_interval,
     async_get_poll_interval,
-    create_channel_motion_data_update_method,
-    create_device_data_update_method,
+    ReolinkEntityData,
 )
 
-from .typing import ReolinkDomainData, ReolinkEntryData
+from .typing import ReolinkDomainData
 
 from .const import (
     DATA_COORDINATOR,
-    DISCOVERY_EVENT,
     DOMAIN,
-    OPT_DISCOVERY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -39,38 +36,19 @@ PLATFORMS: Final = [Platform.CAMERA, Platform.BINARY_SENSOR]
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Setup ReoLink Component"""
 
-    async def _discovery(service: str, info: DiscoveryInfoType):
-        if service == DISCOVERY_EVENT:
-            for entry in hass.config_entries.async_entries(DOMAIN):
-                if OPT_DISCOVERY in entry.options:
-                    discovery: dict = entry.options[OPT_DISCOVERY]
-                    key = "uuid"
-                    if not key in discovery or not key in info:
-                        key = "mac"
-                    if key in discovery and key in info and discovery[key] == info[key]:
-                        if next(
-                            (
-                                True
-                                for k in info
-                                if k not in discovery or discovery[k] != info[k]
-                            ),
-                            False,
-                        ):
-                            options = entry.options.copy()
-                            options[OPT_DISCOVERY] = discovery = discovery.copy()
-                            discovery.update(info)
+    await async_discovery_handler(hass)
 
-                            if not hass.config_entries.async_update_entry(
-                                entry, options=options
-                            ):
-                                _LOGGER.warning("Could not update options")
-                        return
+    domain_data: ReolinkDomainData = hass.data.setdefault(DOMAIN, {})
 
-            async_create_flow(
-                hass, DOMAIN, {"source": SOURCE_INTEGRATION_DISCOVERY}, info
-            )
+    async def _reboot_handler(call: ServiceCall):
+        _LOGGER.debug("Reboot called.")
+        entries: set[str] = await async_extract_config_entry_ids(hass, call)
+        for entry_id in entries:
+            entry_data = domain_data[entry_id]
+            await entry_data["coordinator"].data.client.reboot()
+            hass.create_task(entry_data["coordinator"].async_request_refresh())
 
-    async_listen(hass, DISCOVERY_EVENT, _discovery)
+    hass.services.async_register(DOMAIN, "reboot", _reboot_handler)
 
     return True
 
@@ -85,28 +63,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     domain_data: ReolinkDomainData = hass.data.setdefault(DOMAIN, {})
 
     entry_data = domain_data.setdefault(entry.entry_id, {})
-    coordinator = entry_data.get("coordinator", None)
-    # if setup fails we do not want to recreate the coordinators
+    coordinator = entry_data.get(DATA_COORDINATOR, None)
     if coordinator is None:
+        first_attempt = True
+
+        async def _update_data():
+            nonlocal first_attempt
+
+            if first_attempt:
+                first_attempt = False
+                async with async_timeout.Timeout(10, asyncio.get_event_loop()):
+                    return await entity_data.async_update()
+            return await entity_data.async_update()
+
+        entity_data = ReolinkEntityData(hass, entry)
         coordinator = DataUpdateCoordinator(
             hass,
             _LOGGER,
-            name=f"{DOMAIN}-DataUpdateCoordinator-{entry.entry_id}",
+            name=f"{DOMAIN}-{entity_data.name}",
+            update_method=_update_data,
             update_interval=async_get_poll_interval(entry),
-            update_method=create_device_data_update_method(entry_data),
         )
-        entry_data["coordinator"] = coordinator
-    motion_coordinator = entry_data.get("motion_coordinator", None)
-    if motion_coordinator is None:
-        motion_coordinator = DataUpdateCoordinator(
-            hass,
-            _LOGGER,
-            name=f"{DOMAIN}-Motion-DataUpdateCooridator-{entry.entry_id}",
-            update_interval=async_get_motion_poll_interval(entry),
-            update_method=create_channel_motion_data_update_method(entry_data),
-        )
-        entry_data["motion_coordinator"] = motion_coordinator
-        entry_data["motion_data_request"] = set()
+        entry_data[DATA_COORDINATOR] = coordinator
 
     await coordinator.async_config_entry_first_refresh()
 

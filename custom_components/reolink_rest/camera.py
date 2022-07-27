@@ -3,13 +3,19 @@
 from __future__ import annotations
 from asyncio import Task
 from dataclasses import asdict, dataclass
-from enum import IntEnum, auto
+from enum import IntEnum, IntFlag, auto
 import logging
 from typing import Final
 
-from homeassistant.core import HomeAssistant
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+import voluptuous as vol
+
+from homeassistant.core import HomeAssistant, CALLBACK_TYPE
+from homeassistant.config_entries import ConfigEntry, DiscoveryInfoType
+from homeassistant.helpers.entity_platform import (
+    AddEntitiesCallback,
+    async_get_current_platform,
+)
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from homeassistant.components.camera import (
     Camera,
@@ -26,6 +32,7 @@ from async_reolink.api.errors import ReolinkResponseError
 from async_reolink.api.const import IntStreamTypes as StreamTypes
 
 from .entity import (
+    ReolinkEntityData,
     ReolinkEntityDataUpdateCoordinator,
     ReolinkEntity,
     ReolinkEntityDescription,
@@ -128,17 +135,54 @@ CAMERAS: Final = [
 ]
 
 
+class ReolinkCameraEntityFeature(IntFlag):
+    """Reolink Camera Entity Features"""
+
+    PAN_TILT = 1 << 8
+    ZOOM = 2 << 8
+    FOCUS = 3 << 8
+
+
+async def async_setup_platform(
+    _hass: HomeAssistant,
+    _config_entry: ConfigEntry,
+    _async_add_entities: AddEntitiesCallback,
+    _discovery_info: DiscoveryInfoType | None = None,
+):
+    """Setup camera platform"""
+
+    platform = async_get_current_platform()
+
+    platform.async_register_entity_service(
+        "set_zoom",
+        vol.Schema({"position": int}),
+        "async_set_zoom",
+        [ReolinkCameraEntityFeature.ZOOM.value],
+    )
+
+    platform.async_register_entity_service(
+        "set_focus",
+        vol.Schema({"position": int}),
+        "async_set_focus",
+        [ReolinkCameraEntityFeature.FOCUS.value],
+    )
+
+    # PTZ services: pan tilt (4 or 8 direction) zoom and focus
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ):
-    """Setup camera platform"""
+    """Setup camera entities"""
 
     _LOGGER.debug("Setting up camera")
     domain_data: ReolinkDomainData = hass.data[DOMAIN]
+    entry_data = domain_data[config_entry.entry_id]
+    _entry_data: dict = entry_data
 
-    coordinator = domain_data[config_entry.entry_id][DATA_COORDINATOR]
+    coordinator = entry_data[DATA_COORDINATOR]
 
     stream = "stream" in hass.config.components
 
@@ -146,6 +190,23 @@ async def async_setup_entry(
     data = coordinator.data
     for channel in data.channels.keys():
         ability = coordinator.data.abilities.channels[channel]
+
+        features: int = 0
+
+        has_ptz = False
+        if ability.ptz.type == abilities.channel.PTZTypeValues.AF:
+            features = (
+                ReolinkCameraEntityFeature.ZOOM.value | ReolinkCameraEntityFeature.FOCUS
+            )
+            has_ptz = True
+        elif ability.ptz.type:
+            has_ptz = True
+            features = ReolinkCameraEntityFeature.PAN_TILT.value
+            if ability.ptz.type in (
+                abilities.channel.PTZTypeValues.PTZ,
+                abilities.channel.PTZTypeValues.PTZ_NO_SPEED,
+            ):
+                features |= ReolinkCameraEntityFeature.ZOOM.value
 
         otypes: list[OutputStreamTypes] = []
         if ability.snap:
@@ -168,6 +229,63 @@ async def async_setup_entry(
 
         if not otypes or not stypes:
             continue
+
+        ptz_coordinator = coordinator
+        if has_ptz:
+            coordinators: dict[
+                int, ReolinkEntityDataUpdateCoordinator
+            ] = _entry_data.setdefault("ptz_coordinators", {})
+            if channel not in coordinators:
+
+                def _create_coordinator(channel: int):
+                    entity_data: ReolinkEntityData = coordinator.data
+
+                    async def _update_data():
+                        entity_data.async_request_ptz_update(channel)
+                        return await entity_data.async_update_ptz_data()
+
+                    _coordinator = DataUpdateCoordinator(
+                        hass,
+                        _LOGGER,
+                        name=f"{coordinator.name}-ptz",
+                        update_method=_update_data,
+                    )
+                    _coordinator.data = data
+
+                    add_listener = _coordinator.async_add_listener
+
+                    def _coord_update():
+                        if channel in coordinator.data.updated_motion:
+                            _coordinator.async_set_updated_data(coordinator.data)
+
+                    coord_cleanup = None
+
+                    def _add_listener(
+                        update_callback: CALLBACK_TYPE, context: any = None
+                    ):
+                        nonlocal coord_cleanup
+                        # pylint: disable = protected-access
+                        if len(_coordinator._listeners) == 0:
+                            coord_cleanup = coordinator.async_add_listener(
+                                _coord_update
+                            )
+
+                        cleanup = add_listener(update_callback, context)
+
+                        def _cleanup():
+                            cleanup()
+                            if len(_coordinator._listeners) == 0:
+                                coord_cleanup()
+
+                        return _cleanup
+
+                    _coordinator.async_add_listener = _add_listener
+
+                    return _coordinator
+
+                coordinators[channel] = ptz_coordinator = _create_coordinator(channel)
+            else:
+                ptz_coordinator = coordinators[channel]
 
         main: OutputStreamTypes = None
         first: OutputStreamTypes = None
@@ -199,7 +317,11 @@ async def async_setup_entry(
                 if description.output_type != first:
                     description.entity_registry_enabled_default = False
 
-                entities.append(ReolinkCamera(coordinator, camera_info[0], description))
+                entities.append(
+                    ReolinkCamera(
+                        ptz_coordinator, camera_info[0] | features, description
+                    )
+                )
 
     if entities:
         async_add_entities(entities)
@@ -213,7 +335,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
     def __init__(
         self,
         coordinator: ReolinkEntityDataUpdateCoordinator,
-        supported_features: CameraEntityFeature,
+        supported_features: int,
         description: ReolinkCameraEntityDescription,
         context: any = None,
     ) -> None:
@@ -224,7 +346,9 @@ class ReolinkCamera(ReolinkEntity, Camera):
 
     async def stream_source(self) -> str | None:
         domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
-        client = domain_data[self.coordinator.config_entry.entry_id]["client"]
+        client = domain_data[self.coordinator.config_entry.entry_id][
+            DATA_COORDINATOR
+        ].data.client
 
         if self.entity_description.output_type == OutputStreamTypes.RTSP:
             try:
@@ -252,7 +376,9 @@ class ReolinkCamera(ReolinkEntity, Camera):
 
     async def _async_camera_image(self):
         domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
-        client = domain_data[self.coordinator.config_entry.entry_id]["client"]
+        client = domain_data[self.coordinator.config_entry.entry_id][
+            DATA_COORDINATOR
+        ].data.client
         try:
             image = await client.get_snap(self.entity_description.channel)
         except ReolinkResponseError as resperr:
@@ -284,3 +410,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
             )
 
         return await self._snapshot_task
+
+    async def async_set_zoom(self, position: int):
+        client = self.coordinator.data.client
+        await client.set_ptz_zoom(position, self.entity_description.channel)

@@ -17,8 +17,10 @@ OPT_DISCOVERY: Final = "discovery"
 OPT_CHANNELS: Final = "channels"
 OPT_PREFIX_CHANNEL: Final = "prefix_channel"
 OPT_MOTION_INTERVAL: Final = "motion_interval"
+OPT_BATCH_ABILITY: Final = "batch_abilitiy"
 
 DATA_COORDINATOR: Final = "coordinator"
+DATA_MOTION_COORDINATORS: Final = "motion_coordinators"
 DATA_ONVIF: Final = "onvif"
 
 # keep? ---\/

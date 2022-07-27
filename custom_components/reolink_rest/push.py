@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from dataclasses import asdict
-from datetime import timedelta
+from dataclasses import asdict, dataclass
+from datetime import timedelta, datetime
 import hashlib
 
 import logging
-from typing import Final, TypeVar, overload
+from typing import Callable, Final, TypeVar, overload
 
 import secrets
 
@@ -21,9 +21,8 @@ from aiohttp.web import Request
 
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.loader import bind_hass
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.singleton import singleton
 from homeassistant.util import dt
 
 from homeassistant.backports.enum import StrEnum
@@ -33,15 +32,16 @@ import isodate
 
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
-from .const import DOMAIN, OPT_DISCOVERY
+from .const import DATA_MOTION_COORDINATORS, DOMAIN, OPT_DISCOVERY
 
-from .models import DeviceData, PushSubscription
-from .typing import ReolinkDomainData, ReolinkEntryData, WebhookManager
+from .typing import EntityData, ReolinkDomainData
 
 DATA_MANAGER: Final = "push_manager"
 DATA_STORE: Final = "push_store"
 
 STORE_VERSION: Final = 1
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class _Namespaces(StrEnum):
@@ -200,89 +200,79 @@ def _process_error_response(response: et.Element):
     return (_text(code), _text(reason))
 
 
+@dataclass(frozen=True)
+class PushSubscription:
+    """Push Subscription Token"""
+
+    manager_url: str
+    timestamp: datetime
+    expires: timedelta | None
+
+    def __post_init__(self):
+        if self.timestamp and not isinstance(self.timestamp, datetime):
+            object.__setattr__(self, "timestamp", dt.parse_datetime(self.timestamp))
+        if self.expires and not isinstance(self.expires, timedelta):
+            object.__setattr__(self, "expires", dt.parse_duration(self.expires))
+
+
 class PushManager:
     """Push Manager"""
 
     def __init__(
         self,
-        logger: logging.Logger,
-        url: str,
         storage: Store,
-        entry_id: str,
     ) -> None:
-        self._logger = logger
-        self._url = url
         self._storage = storage
-        self._subscription: PushSubscription = None
+        self._subscriptions: dict[str, PushSubscription] = None
+        self._renew_id = None
+        self._next_renewal = None
         self._renew_task = None
-        self._entry_id = entry_id
-        self._motion_interval: timedelta = None
+        self._on_failure: list[Callable[[str], None]] = []
 
-    async def async_start(self):
-        """start up manager"""
+    async def _ensure_subscriptions(self):
+        if self._subscriptions is not None:
+            return
+
         data = await self._storage.async_load()
-        if isinstance(data, dict) and self._entry_id in data:
-            self._subscription = PushSubscription(**data[self._entry_id])
-            # if we retrieve a sub we must have crashed so we will
-            # "renew" it incase the camera was reset inbetween
+        if isinstance(data, dict):
+            self._subscriptions = {
+                _k: PushSubscription(**_v) for _k, _v, in data.items()
+            }
+        else:
+            self._subscriptions = {}
 
-        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
-        entry_data = domain_data[self._entry_id]
-        await self._subscribe(entry_data)
-
-    async def async_stop(self):
-        """shutdown manager"""
-        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
-        entry_data = domain_data[self._entry_id]
-        await self._unsubscribe(entry_data)
-
-    async def async_reftresh(self):
-        """force refresh of manage incase device state changed"""
-        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
-        entry_data = domain_data[self._entry_id]
-        self._renew(entry_data)
-
-    async def _store_subscription(self):
-        data = await self._storage.async_load()
-        if self._subscription:
-            sub = asdict(self._subscription)
+    async def _save_subscriptions(self):
+        def _fix_expires(sub: dict):
             if "expires" in sub:
                 sub["expires"] = isodate.duration_isoformat(sub["expires"])
-        else:
-            sub = None
+            return sub
 
-        if isinstance(data, dict):
-            if not sub and self._entry_id in data:
-                data.pop(self._entry_id)
-            else:
-                data[self._entry_id] = sub
-        elif sub:
-            data = {self._entry_id: sub}
-        if data is not None:
-            await self._storage.async_save(data)
+        data = {_k: _fix_expires(asdict(_v)) for _k, _v in self._subscriptions.items()}
+        await self._storage.async_save(data)
 
     async def _send(self, url: str, headers, data):
 
         async with ClientSession(connector=TCPConnector(verify_ssl=False)) as client:
-            self._logger.debug("sending data")
+            _LOGGER.debug("%s->%r", url, data)
 
             headers.setdefault("content-type", "application/soap+xml;charset=UTF-8")
             async with client.post(
                 url, data=data, headers=headers, allow_redirects=False
             ) as response:
                 if "xml" not in response.content_type:
-                    self._logger.warning("bad response")
+                    _LOGGER.warning("bad response")
                     return None
 
                 text = await response.text()
+                _LOGGER.debug("%s<-%r, %r", url, response.status, text)
                 return (response.status, et.fromstring(text))
 
-    def _get_onvif_base(self, config_entry: ConfigEntry, device_data: DeviceData):
+    def _get_onvif_base(self, config_entry: ConfigEntry, device_data: EntityData):
         discovery: dict = config_entry.options.get(OPT_DISCOVERY, {})
         host = config_entry.data.get(CONF_HOST, discovery.get("ip", None))
         return f"http://{host}:{device_data.ports['onvifPort']}"
 
-    def _get_service_url(self, config_entry: ConfigEntry, device_data: DeviceData):
+    def _get_service_url(self, config_entry: ConfigEntry, device_data: EntityData):
         return self._get_onvif_base(config_entry, device_data) + EVENT_SERVICE
 
     def _get_wsse(self, config_entry: ConfigEntry):
@@ -293,59 +283,67 @@ class PushManager:
 
     def _handle_failed_subscription(
         self,
-        coordinator: DataUpdateCoordinator,
-        entry_data: ReolinkEntryData,
+        url: str,
+        entry_id: str,
         save: bool,
     ):
-        def _retry():
-            cleanup()
-            self._storage.hass.create_task(self._subscribe(entry_data, save))
+        # def _retry():
+        #    cleanup()
+        #    self._storage.hass.create_task(self._subscribe(url, entry_id, save))
 
-        cleanup = coordinator.async_add_listener(_retry)
+        # domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        # entry_data = domain_data[entry_id]
+        # coordinator = entry_data["coordinator"]
+        # attempt resubscribe on next coordinator retrieval success
+        # cleanup = coordinator.async_add_listener(_retry)
 
-        if self._motion_interval:
-            entry_data["motion_coordinator"].update_interval = self._motion_interval
-            self._motion_interval = None
+        for handler in self._on_failure:
+            handler(entry_id)
 
-    async def _subscribe(self, entry_data: ReolinkEntryData, save: bool = True):
-        await self._unsubscribe(entry_data, False)
+    def _cancel_renew(self):
+        if self._renew_task and not self._renew_task.cancelled():
+            self._renew_task.cancel()
+        self._renew_task = None
 
-        coordinator = entry_data["coordinator"]
+    def _schedule_next_renew(
+        self, loop: asyncio.AbstractEventLoop, entry_id: str | None = None
+    ):
+        sub = None
+        if entry_id is not None:
+            sub = self._subscriptions[entry_id]
+        else:
+            expires = None
+            for _id, _sub in self._subscriptions.items():
+                if _sub.expires is not None and (
+                    expires is None or _sub.expires < expires
+                ):
+                    expires = _sub.expires
+                    sub = _sub
+                    entry_id = _id
+                    break
 
-        wsse = self._get_wsse(coordinator.config_entry)
-        message = _create_subscribe(self._url)
-
-        headers = {"action": message[0]}
-
-        data = _create_envelope(message[2], wsse, *message[1])
-        response = None
-        try:
-            response = await self._send(
-                self._get_service_url(coordinator.config_entry, coordinator.data),
-                headers,
-                et.tostring(data),
-            )
-        except client_exceptions.ServerDisconnectedError:
-            raise
-        if response is None:
+        if sub is None or sub.expires is None:
             return
+        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        entry_data = domain_data[entry_id]
+        expires = (
+            sub.timestamp + sub.expires + entry_data["coordinator"].data.time_difference
+        )
 
-        status, response = response
-        if status != 200:
-            (code, reason) = _process_error_response(response)
-
-            # error respons is kinda useless so we just assume
-            self._logger.warning(
-                f"Camera ({coordinator.data.device_info['name']}) refused subscription request, probably needs a reboot."
-            )
-            self._handle_failed_subscription(coordinator, entry_data, save)
+        if self._next_renewal is not None and expires > self._next_renewal:
             return
+        self._cancel_renew()
 
-        response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
-        await self._process_subscription(response, entry_data, save)
+        delay = max((expires - dt.utcnow()).total_seconds(), 0)
+
+        def _task():
+            loop.create_task(self._renew(entry_id))
+
+        self._renew_id = entry_id
+        self._renew_task = loop.call_later(delay, _task)
 
     async def _process_subscription(
-        self, response: et.Element, entry_data: ReolinkEntryData, save: bool = True
+        self, response: et.Element, entry_id: str, save: bool = True
     ):
         reference = _find(_Namespaces.WSNT.tag("SubscriptionReference"), response)
         reference = _text(_find(_Namespaces.WSA.tag("Address"), reference), reference)
@@ -368,41 +366,89 @@ class PushManager:
         expires = dt.parse_datetime(expires) if expires else None
         expires = expires - time if expires else None
 
-        self._subscription = PushSubscription(reference, time, expires)
-        if self._motion_interval is None:
-            coordinator = entry_data["motion_coordinator"]
-            self._motion_interval = coordinator.update_interval
-            coordinator.update_interval = None
+        sub = PushSubscription(reference, time, expires)
+        self._subscriptions[entry_id] = sub
 
-        self._schedule_renew(entry_data, asyncio.get_event_loop())
+        self._schedule_next_renew(asyncio.get_event_loop(), entry_id)
 
         if save:
-            await self._store_subscription()
+            await self._save_subscriptions()
+        return sub
 
-    async def _renew(self, entry_data: ReolinkEntryData, save: bool = True):
-        sub = self._subscription
-        if sub and not sub.expires:
+    async def _subscribe(
+        self,
+        url: str,
+        entry_id: str,
+        save: bool = True,
+    ):
+        config_entry = self._storage.hass.config_entries.async_get_entry(entry_id)
+
+        wsse = self._get_wsse(config_entry)
+        message = _create_subscribe(url)
+
+        headers = {"action": message[0]}
+
+        data = _create_envelope(message[2], wsse, *message[1])
+        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        entry_data = domain_data[entry_id]
+        entity_data = entry_data["coordinator"].data
+        response = None
+        try:
+            response = await self._send(
+                self._get_service_url(config_entry, entity_data),
+                headers,
+                et.tostring(data),
+            )
+        except client_exceptions.ServerDisconnectedError:
+            raise
+        if response is None:
+            return None
+
+        status, response = response
+        if status != 200:
+            (code, reason) = _process_error_response(response)
+
+            # error respons is kinda useless so we just assume
+            _LOGGER.warning(
+                "Camera (%s) refused subscription request, probably needs a reboot.",
+                entity_data.device_info["name"],
+            )
+            self._handle_failed_subscription(url, entry_id, save)
             return
 
+        response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
+        return await self._process_subscription(response, entry_id, save)
+
+    async def _renew(
+        self,
+        entry_id: str,
+        url: str | None = None,
+        save: bool = True,
+    ):
+        sub = self._subscriptions.get(entry_id, None)
+        if sub is None:
+            return
+
+        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        entry_data = domain_data[entry_id]
         coordinator = entry_data["coordinator"]
-
-        if sub and sub.expires:
-            data = coordinator.data
-            camera_now = dt.utcnow() + data.drift
-            expires = sub.timestamp + sub.expires
-            if (expires - camera_now).total_seconds() < 1:
-                return await self._subscribe(entry_data, save)
-
-        if not sub:
-            return await self._subscribe(entry_data, save)
-
-        url = (
+        manager_url = (
             self._get_onvif_base(coordinator.config_entry, coordinator.data)
             + sub.manager_url
         )
 
+        if sub.expires:
+            if url is not None:
+                data = coordinator.data
+                camera_now = dt.utcnow() + data.time_difference
+                expires = sub.timestamp + sub.expires
+                if (expires - camera_now).total_seconds() < 2:
+                    return await self._subscribe(url, entry_id, save)
+                return await self._unsubscribe(entry_id, save)
+            return None
+
         wsse = self._get_wsse(coordinator.config_entry)
-        message = _create_renew(url)
+        message = _create_renew(manager_url, sub.expires)
 
         headers = {"action": message[0]}
         data = _create_envelope(message[2], wsse, *message[1])
@@ -419,30 +465,37 @@ class PushManager:
             (code, reason) = _process_error_response(response)
 
             # error respons is kinda useless so we just assume
-            self._logger.warning(
-                f"Camera ({coordinator.data.device_info['name']}) refused subscription renewal, probably was rebooted."
+            _LOGGER.warning(
+                "Camera (%s) refused subscription renewal, probably was rebooted.",
+                coordinator.data.device_info["name"],
             )
-            self._handle_failed_subscription(coordinator, entry_data, save)
-            return
+            if url is not None:
+                return await self._subscribe(url, entry_id, save)
+            self._handle_failed_subscription(url, entry_id, save)
+            return None
 
         response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
-        await self._process_subscription(response, entry_data, save)
+        return await self._process_subscription(response, entry_id, save)
 
-    async def _unsubscribe(self, entry_data: ReolinkEntryData, save: bool = True):
-        sub = self._subscription
-        if not sub:
+    async def _unsubscribe(self, entry_id: str, save: bool = True):
+        if entry_id == self._renew_id:
+            self._cancel_renew()
+            self._schedule_next_renew(asyncio.get_event_loop())
+
+        sub = self._subscriptions.pop(entry_id, None)
+        if sub is None:
             return
 
-        self._cancel_renew()
-
+        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        entry_data = domain_data[entry_id]
         coordinator = entry_data["coordinator"]
 
         send = True
         if sub.expires:
             data = coordinator.data
-            camera_now = dt.utcnow() + data.drift
+            camera_now = dt.utcnow() + data.time_difference
             expires = sub.timestamp + sub.expires
-            send = (expires - camera_now).total_seconds() > 1
+            send = (expires - camera_now).total_seconds() < 1
 
         # no need to unsubscribe an expiring/expired subscription
         if send:
@@ -463,7 +516,7 @@ class PushManager:
                 )
             except client_exceptions.ServerDisconnectedError:
                 # this could mean our subscription is invalid for now log and ignore
-                self._logger.warning(
+                _LOGGER.warning(
                     "Got disconnected on attempt to unsubscribe, assuming invalid subscription"
                 )
 
@@ -473,34 +526,42 @@ class PushManager:
             status, response = response
             if status != 200:
                 (code, reason) = _process_error_response(response)
-                self._logger.warning("bad response")
+                _LOGGER.warning("bad response")
 
-        self._subscription = None
         if save:
-            await self._store_subscription()
+            await self._save_subscriptions()
 
-    def _cancel_renew(self):
-        if self._renew_task and not self._renew_task.cancelled():
-            self._renew_task.cancel()
-        self._renew_task = None
+    async def async_subscribe(self, url: str, config_entry: ConfigEntry):
+        """Subcribe"""
+        await self._ensure_subscriptions()
 
-    def _schedule_renew(
-        self, entry_data: ReolinkEntryData, loop: asyncio.AbstractEventLoop
-    ):
-        self._cancel_renew()
-        sub = self._subscription
-        if not sub or not sub.expires:
-            return
+        if config_entry.entry_id in self._subscriptions:
+            return await self._renew(config_entry.entry_id, url)
+        return await self._subscribe(url, config_entry.entry_id)
 
-        data = entry_data["coordinator"].data
-        camera_now = dt.utcnow() + data.drift
-        expires = sub.timestamp + sub.expires
-        delay = max((expires - camera_now).total_seconds(), 0)
+    async def async_unsubscribe(self, subscription: PushSubscription):
+        """Unsubscribe"""
+        await self._ensure_subscriptions()
+        entry_id = next(
+            (
+                entry_id
+                for (entry_id, sub) in self._subscriptions.items()
+                if sub == subscription
+            ),
+            None,
+        )
+        if entry_id is None:
+            return False
+        await self._unsubscribe(entry_id)
+        return True
 
-        def _task():
-            loop.create_task(self._renew(entry_data))
+    def async_on_subscription_failure(self, callback: Callable[[str], None]):
+        self._on_failure.append(callback)
 
-        self._renew_task = loop.call_later(delay, _task)
+        def _remove():
+            self._on_failure.remove(callback)
+
+        return _remove
 
 
 async def async_parse_notification(request: Request):
@@ -510,6 +571,7 @@ async def async_parse_notification(request: Request):
         return None
 
     text = await request.text()
+    _LOGGER.debug("processing notification<-%r", text)
     env = et.fromstring(text)
     if env is None or env.tag != f"{{{_Namespaces.SOAP_ENV}}}Envelope":
         return None
@@ -526,37 +588,16 @@ async def async_parse_notification(request: Request):
     if motion is None:
         return None
 
-    return motion.attrib["Value"]
+    return motion.attrib["Value"][0:1].lower() == "t"
 
 
+@singleton(f"{DOMAIN}-push-manager")
 @callback
-@bind_hass
 def async_get_push_manager(
     hass: HomeAssistant,
-    logger: logging.Logger,
-    entry: ConfigEntry,
-    webhook: WebhookManager,
 ) -> PushManager:
     """Get Push Manager"""
 
-    domain_data: dict = hass.data[DOMAIN]
-    entry_data: dict = domain_data[entry.entry_id]
-
-    if DATA_MANAGER in entry_data:
-        return entry_data[DATA_MANAGER]
-
-    storage: Store = domain_data.setdefault(
-        DATA_STORE, Store(hass, STORE_VERSION, f"{DOMAIN}.push_subs")
-    )
-
-    entry_data[DATA_MANAGER] = manager = PushManager(
-        logger, webhook.url, storage, entry.entry_id
-    )
-
-    def _unload():
-        hass.create_task(manager.async_stop())
-
-    entry.async_on_unload(_unload)
-    hass.create_task(manager.async_start())
-
+    storage = Store(hass, STORE_VERSION, f"{DOMAIN}_push")
+    manager = PushManager(storage)
     return manager

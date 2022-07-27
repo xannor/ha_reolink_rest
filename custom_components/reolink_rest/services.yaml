@@ -1,0 +1,6 @@
+reboot:
+  name: Reboot
+  description: Remotely Reboot ReoLink device
+  target:
+    device:
+      integration: reolink_rest

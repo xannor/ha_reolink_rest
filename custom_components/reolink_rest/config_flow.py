@@ -25,6 +25,7 @@ from async_reolink.api import errors as reo_errors
 from async_reolink.api.network import ChannelStatusType
 from async_reolink.rest import Client as RestClient
 from async_reolink.rest.connection import Encryption
+from async_reolink.rest.errors import AUTH_ERRORCODES
 
 from .const import (
     DEFAULT_PREFIX_CHANNEL,
@@ -249,15 +250,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors = {"base": "timeout"}
             return await self.async_step_connection(data, errors)
         except reo_errors.ReolinkResponseError as resp_error:
-            if resp_error.code in (
-                reo_errors.ErrorCodes.AUTH_REQUIRED,
-                reo_errors.ErrorCodes.LOGIN_FAILED,
-            ):
+            if resp_error.code in AUTH_ERRORCODES:
                 errors = {"base": "invalid_auth"}
                 return await self.async_step_auth(data, errors)
             _LOGGER.exception(
                 "An internal device error occurred on %s, configuration aborting",
-                self.data[CONF_HOST],
+                data[CONF_HOST],
             )
             return self.async_abort(reason="device_error")
         except Exception:  # pylint: disable=broad-except

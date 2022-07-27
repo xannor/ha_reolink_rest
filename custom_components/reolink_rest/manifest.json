@@ -5,7 +5,7 @@
   "issue_tracker": "https://github.com/xannor/ha_reolink_rest/issues",
   "version": "0.5.2",
   "iot_class": "local_polling",
-  "requirements": ["async-reolink.rest==0.5.5"],
+  "requirements": ["async-reolink.rest==0.5.7"],
   "dependencies": ["camera"],
   "after_dependencies": ["stream", "webhook", "reolink_discovery"],
   "codeowners": ["@xannor"],
