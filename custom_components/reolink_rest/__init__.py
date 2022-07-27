@@ -72,7 +72,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             if first_attempt:
                 first_attempt = False
-                async with async_timeout.Timeout(10, asyncio.get_event_loop()):
+                async with async_timeout.timeout(15):
                     return await entity_data.async_update()
             return await entity_data.async_update()
 

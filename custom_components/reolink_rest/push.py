@@ -268,12 +268,17 @@ class PushManager:
                 return (response.status, et.fromstring(text))
 
     def _get_onvif_base(self, config_entry: ConfigEntry, device_data: EntityData):
+        if not bool(device_data.ports["onvifEnable"]):
+            return None
         discovery: dict = config_entry.options.get(OPT_DISCOVERY, {})
         host = config_entry.data.get(CONF_HOST, discovery.get("ip", None))
         return f"http://{host}:{device_data.ports['onvifPort']}"
 
     def _get_service_url(self, config_entry: ConfigEntry, device_data: EntityData):
-        return self._get_onvif_base(config_entry, device_data) + EVENT_SERVICE
+        base = self._get_onvif_base(config_entry, device_data)
+        if base is None:
+            return None
+        return base + EVENT_SERVICE
 
     def _get_wsse(self, config_entry: ConfigEntry):
         return _create_wsse(
@@ -392,16 +397,19 @@ class PushManager:
         domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
         entry_data = domain_data[entry_id]
         entity_data = entry_data["coordinator"].data
+        service_url = self._get_service_url(config_entry, entity_data)
         response = None
-        try:
-            response = await self._send(
-                self._get_service_url(config_entry, entity_data),
-                headers,
-                et.tostring(data),
-            )
-        except client_exceptions.ServerDisconnectedError:
-            raise
+        if service_url is not None:
+            try:
+                response = await self._send(
+                    service_url,
+                    headers,
+                    et.tostring(data),
+                )
+            except client_exceptions.ServerDisconnectedError:
+                raise
         if response is None:
+            self._handle_failed_subscription(url, entry_id, save)
             return None
 
         status, response = response
@@ -414,7 +422,7 @@ class PushManager:
                 entity_data.device_info["name"],
             )
             self._handle_failed_subscription(url, entry_id, save)
-            return
+            return None
 
         response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
         return await self._process_subscription(response, entry_id, save)
@@ -432,10 +440,10 @@ class PushManager:
         domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
         entry_data = domain_data[entry_id]
         coordinator = entry_data["coordinator"]
-        manager_url = (
-            self._get_onvif_base(coordinator.config_entry, coordinator.data)
-            + sub.manager_url
-        )
+        manager_url = self._get_onvif_base(coordinator.config_entry, coordinator.data)
+        if manager_url is None:
+            return None
+        manager_url += sub.manager_url
 
         if sub.expires:
             if url is not None:
@@ -500,6 +508,10 @@ class PushManager:
         # no need to unsubscribe an expiring/expired subscription
         if send:
             url = self._get_onvif_base(coordinator.config_entry, coordinator.data)
+            if url is None:
+                send = False
+
+        if send:
             url += sub.manager_url
 
             wsse = self._get_wsse(coordinator.config_entry)
