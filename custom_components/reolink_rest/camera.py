@@ -350,7 +350,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
         self._attr_supported_features = supported_features
         self._snapshot_task: Task[bytes | None] = None
         if self.entity_description.output_type == OutputStreamTypes.RTSP and not bool(
-            self.coordinator.data.ports["rtspEnable"]
+            self.coordinator.data.ports.get("rtspEnable", True)
         ):
             self._attr_available = False
             self.coordinator.logger.error(
@@ -358,7 +358,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
                 self.coordinator.data.device.name,
             )
         elif self.entity_description.output_type == OutputStreamTypes.RTMP and not bool(
-            self.coordinator.data.ports["rtmpEnable"]
+            self.coordinator.data.ports.get("rtmpEnable", True)
         ):
             self._attr_available = False
             self.coordinator.logger.error(
@@ -399,6 +399,12 @@ class ReolinkCamera(ReolinkEntity, Camera):
         else:
             return await super().stream_source()
         return url
+
+    async def _async_use_rtsp_to_webrtc(self) -> bool:
+        # Force falce since the RTMP stream does not seem to work with webrtc
+        if self.entity_description.output_type != OutputStreamTypes.RTSP:
+            return False
+        return await super()._async_use_rtsp_to_webrtc()
 
     async def _async_camera_image(self):
         domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
@@ -445,9 +451,13 @@ class ReolinkCamera(ReolinkEntity, Camera):
 
     def _handle_coordinator_update(self) -> None:
         if self.entity_description.output_type == OutputStreamTypes.RTSP:
-            self._attr_available = bool(self.coordinator.data.ports["rtspEnable"])
+            self._attr_available = bool(
+                self.coordinator.data.ports.get("rtspEnable", True)
+            )
         elif self.entity_description.output_type == OutputStreamTypes.RTMP:
-            self._attr_available = bool(self.coordinator.data.ports["rtmpEnable"])
+            self._attr_available = bool(
+                self.coordinator.data.ports.get("rtmpEnable", True)
+            )
         return super()._handle_coordinator_update()
 
     async def async_set_zoom(self, position: int):
