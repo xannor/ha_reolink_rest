@@ -414,6 +414,12 @@ class ReolinkCamera(ReolinkEntity, Camera):
             return False
         return await super()._async_use_rtsp_to_webrtc()
 
+    async def _async_use_rtsp_to_webrtc(self) -> bool:
+        # Force falce since the RTMP stream does not seem to work with webrtc
+        if self.entity_description.output_type != OutputStreamTypes.RTSP:
+            return False
+        return await super()._async_use_rtsp_to_webrtc()
+
     async def _async_camera_image(self):
         domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
         client = domain_data[self.coordinator.config_entry.entry_id][
