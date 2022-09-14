@@ -28,11 +28,10 @@ from homeassistant.util import dt
 from homeassistant.backports.enum import StrEnum
 
 from homeassistant.const import CONF_HOST, CONF_USERNAME, CONF_PASSWORD
-import isodate
 
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
-from .const import DATA_MOTION_COORDINATORS, DOMAIN, OPT_DISCOVERY
+from .const import DOMAIN, OPT_DISCOVERY
 
 from .typing import EntityData, ReolinkDomainData
 
@@ -95,6 +94,33 @@ def _create_wsse(*, username: str, password: str):
     return wsse
 
 
+def _duration_isoformat(value: timedelta):
+    if value is None:
+        return None
+    if value.days:
+        res = f"P{value.days}D"
+    else:
+        res = ""
+    if value.seconds or value.microseconds:
+        res += "T"
+        minutes = value.seconds // 60
+        seconds = value.seconds % 60
+        if value.microseconds:
+            seconds += value.microseconds / 1000
+        hours = minutes // 60
+        minutes = minutes % 60
+        if hours:
+            res += f"{hours}H"
+        if minutes:
+            res += f"{minutes}M"
+        if seconds:
+            res += f"{seconds}S"
+    if not res:
+        res = "P0D"
+
+    return res
+
+
 def _create_subscribe(
     address: str, expires: timedelta = None
 ) -> tuple[str, list[et.Element], et.Element]:
@@ -106,7 +132,7 @@ def _create_subscribe(
     if expires is not None:
         et.SubElement(
             subscribe, _Namespaces.WSNT.tag("InitialTerminationTime")
-        ).text = isodate.duration_isoformat(expires)
+        ).text = _duration_isoformat(expires)
     return (
         "http://docs.oasis-open.org/wsn/bw-2/NotificationProducer/SubscribeRequest",
         [],
@@ -122,7 +148,7 @@ def _create_renew(manager: str, new_expires: timedelta = None):
     if new_expires is not None:
         et.SubElement(
             renew, _Namespaces.WSNT.tag("TerminationTime")
-        ).text = isodate.duration_isoformat(new_expires)
+        ).text = _duration_isoformat(new_expires)
 
     headers = [et.Element(_Namespaces.WSA.tag("Action"))]
     headers[0].text = _ACTION
@@ -146,7 +172,7 @@ def _create_unsubscribe(manager: str):
 
 EVENT_SERVICE: Final = "/onvif/event_service"
 
-DEFAULT_EXPIRES: Final = timedelta(days=1)
+DEFAULT_EXPIRES: Final = timedelta(hours=1)
 
 _T = TypeVar("_T")
 _VT = TypeVar("_VT")
@@ -181,7 +207,7 @@ def _text(*elements: et.Element):
         return None
     if len(elements) == 1:
         return elements[0].text
-    _e = coalesce(*elements)
+    _e = coalesce(*elements, __default=None)
     if _e is None:
         return None
     return _e.text
@@ -244,7 +270,7 @@ class PushManager:
     async def _save_subscriptions(self):
         def _fix_expires(sub: dict):
             if "expires" in sub:
-                sub["expires"] = isodate.duration_isoformat(sub["expires"])
+                sub["expires"] = _duration_isoformat(sub["expires"])
             return sub
 
         data = {_k: _fix_expires(asdict(_v)) for _k, _v in self._subscriptions.items()}
@@ -268,11 +294,11 @@ class PushManager:
                 return (response.status, et.fromstring(text))
 
     def _get_onvif_base(self, config_entry: ConfigEntry, device_data: EntityData):
-        if not bool(device_data.ports.get("onvifEnable", True)):
+        if not device_data.ports.onvif.enabled:
             return None
         discovery: dict = config_entry.options.get(OPT_DISCOVERY, {})
         host = config_entry.data.get(CONF_HOST, discovery.get("ip", None))
-        return f"http://{host}:{device_data.ports['onvifPort']}"
+        return f"http://{host}:{device_data.ports.onvif.value}"
 
     def _get_service_url(self, config_entry: ConfigEntry, device_data: EntityData):
         base = self._get_onvif_base(config_entry, device_data)
@@ -330,7 +356,11 @@ class PushManager:
         if sub is None or sub.expires is None:
             return
         domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
-        entry_data = domain_data[entry_id]
+        entry_data = domain_data.get(entry_id, None)
+        if entry_data is None:
+            # entry was removed so we need to bail
+            self._cancel_renew()
+            return
         expires = (
             sub.timestamp + sub.expires + entry_data["coordinator"].data.time_difference
         )
@@ -389,7 +419,7 @@ class PushManager:
         config_entry = self._storage.hass.config_entries.async_get_entry(entry_id)
 
         wsse = self._get_wsse(config_entry)
-        message = _create_subscribe(url)
+        message = _create_subscribe(url, DEFAULT_EXPIRES)
 
         headers = {"action": message[0]}
 
@@ -419,7 +449,7 @@ class PushManager:
             # error respons is kinda useless so we just assume
             _LOGGER.warning(
                 "Camera (%s) refused subscription request, probably needs a reboot.",
-                entity_data.device_info["name"],
+                entity_data.device_info.name,
             )
             self._handle_failed_subscription(url, entry_id, save)
             return None
@@ -475,7 +505,7 @@ class PushManager:
             # error respons is kinda useless so we just assume
             _LOGGER.warning(
                 "Camera (%s) refused subscription renewal, probably was rebooted.",
-                coordinator.data.device_info["name"],
+                coordinator.data.device_info.name,
             )
             if url is not None:
                 return await self._subscribe(url, entry_id, save)

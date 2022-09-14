@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import TypeVar
+from typing import Mapping, TypeVar
 from urllib.parse import urlparse
 
 import voluptuous as vol
@@ -22,7 +22,7 @@ from homeassistant.const import (
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
 from async_reolink.api import errors as reo_errors
-from async_reolink.api.network import ChannelStatusType
+from async_reolink.api.network.typings import ChannelStatus
 from async_reolink.rest import Client as RestClient
 from async_reolink.rest.connection import Encryption
 from async_reolink.rest.errors import AUTH_ERRORCODES
@@ -115,9 +115,9 @@ def _auth_schema(require_password: bool = False, **defaults: UserDataType):
     }
 
 
-def _simple_channels(channels: list[ChannelStatusType]):
+def _simple_channels(channels: Mapping[int, ChannelStatus]):
     return (
-        {channel["channel"]: channel["name"] for channel in channels}
+        {i: channel.name for i, channel in channels.items()}
         if channels is not None
         else None
     )
@@ -218,25 +218,26 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             abilities = await client.get_ability(
                 data.get(CONF_USERNAME, DEFAULT_USERNAME)
             )
-            if abilities.devInfo:
+
+            if abilities.device.info:
                 devinfo = await client.get_device_info()
-                title: str = devinfo.get("name", title)
+                title: str = devinfo.name or title
                 if self.unique_id is None:
                     if abilities.p2p:
                         p2p = await client.get_p2p()
-                    if abilities.localLink:
+                    if abilities.local_link:
                         link = await client.get_local_link()
                     unique_id = _create_unique_id(
-                        uuid=p2p["uid"] if p2p is not None else None,
-                        device_type=devinfo["type"] if devinfo is not None else None,
-                        serial=devinfo["serial"] if devinfo is not None else None,
-                        mac=link["mac"] if link is not None else None,
+                        uuid=p2p.uid if p2p is not None else None,
+                        device_type=devinfo.type if devinfo is not None else None,
+                        serial=devinfo.serial if devinfo is not None else None,
+                        mac=link.mac if link is not None else None,
                     )
                     if unique_id is not None:
-                        self.async_set_unique_id(unique_id)
+                        await self.async_set_unique_id(unique_id)
                         self._abort_if_unique_id_configured()
 
-                if devinfo["channelNum"] > 1:
+                if devinfo.channels > 1:
                     channels = await client.get_channel_status()
                     if channels is not None:
                         self.context["channels"] = _simple_channels(channels)
@@ -251,7 +252,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_connection(data, errors)
         except reo_errors.ReolinkResponseError as resp_error:
             if resp_error.code in AUTH_ERRORCODES:
-                errors = {"base": "invalid_auth"}
+                errors = (
+                    {"base": "invalid_auth"}
+                    if data.get(CONF_USERNAME, DEFAULT_USERNAME) != DEFAULT_USERNAME
+                    or data.get(CONF_PASSWORD, DEFAULT_PASSWORD) != DEFAULT_PASSWORD
+                    else {"base": "auth_required"}
+                )
                 return await self.async_step_auth(data, errors)
             _LOGGER.exception(
                 "An internal device error occurred on %s, configuration aborting",
@@ -312,12 +318,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None and errors is None:
             if _validate_connection_data(user_input):
-                user_input = {dslice(user_input, CONF_HOST, CONF_PORT, CONF_USE_HTTPS)}
+                user_input = dict(
+                    dslice(user_input, CONF_HOST, CONF_PORT, CONF_USE_HTTPS)
+                )
                 if self.data is not None:
                     self.data.update(user_input)
                 else:
                     self.data = user_input
-                return await self.async_step_user()
+                return await self.async_step_user(user_input)
 
         schema = _connection_schema(**(user_input or {}))
 
@@ -338,7 +346,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None and errors is None:
             user_input = dict(dslice(user_input, CONF_USERNAME, CONF_PASSWORD))
             self.data.update(user_input)
-            return await self.async_step_user()
+            return await self.async_step_user(user_input)
 
         schema = _auth_schema(errors is not None, **(user_input or self.data or {}))
 
@@ -367,7 +375,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not self.options:
                 self.options = {}
             self.options.update(user_input)
-            return await self.async_step_user()
+            return await self.async_step_user(user_input)
 
         schema = _channels_schema(
             self.context["channels"], **(user_input or self.options or {})

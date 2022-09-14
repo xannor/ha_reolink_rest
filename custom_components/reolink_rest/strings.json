@@ -34,10 +34,12 @@
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "unknown": "[%key:common::config_flow::error::unknown%]",
       "timeout": "[%key:common::config_flow::error::timeout_connect%]",
-      "channel_required": "Channel selection is required"
+      "channel_required": "Channel selection is required",
+      "auth_required": "Authentication is required"
     },
     "abort": {
-      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+      "already_configured": "[%key:common::config_flow::abort::already_configured_device%]",
+      "device_error": "A device communication error occurred and setup cannot complete."
     }
   },
   "options": {

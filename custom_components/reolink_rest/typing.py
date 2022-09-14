@@ -9,23 +9,15 @@ from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.helpers.device_registry import DeviceEntry
-from async_reolink.api import system, network, ptz
+from async_reolink.api.ai import typings as ai
+from async_reolink.api.network import typings as network
+from async_reolink.api.system import typings as system
+from async_reolink.api.system.capabilities import Capabilities
+
+
 from async_reolink.rest import Client
 
-from .models import MotionData, PTZPosition, PTZDisabled
-
-
-class PTZData(Protocol):
-    """PTZ Data"""
-
-    pan: PTZPosition
-    tilt: PTZPosition
-    zoom: PTZPosition
-    focus: PTZPosition
-    autofocus: PTZDisabled
-    presets: Mapping[ptz.PTZPresetId, ptz.PTZPreset] | None
-    patrol: Mapping[ptz.PTZPatrolId, ptz.PTZPatrol] | None
-    tattern: Mapping[ptz.PTZTrackId, ptz.PTZTrack] | None
+from .models import Motion, PTZ
 
 
 class EntityData(Protocol):
@@ -34,22 +26,21 @@ class EntityData(Protocol):
     client: Client
     device: DeviceEntry
     time_difference: timedelta
-    abilities: system.abilities.Abilities
-    device_info: system.DeviceInfoType
+    abilities: Capabilities
+    device_info: system.DeviceInfo
     channels: Mapping[int, DeviceInfo]
-    ports: network.NetworkPortsType
+    ports: network.NetworkPorts
     updated_motion: frozenset[int]
-    motion: Mapping[int, MotionData]
+    ai: ai.Config
+    motion: Mapping[int, Motion]
     updated_ptz: frozenset[int]
-    ptz: Mapping[int, PTZData]
+    ptz: Mapping[int, PTZ]
 
     def async_request_motion_update(self, channel: int = 0) -> None:
         """Request motion update for channel"""
-        ...
 
     def async_request_ptz_update(self, channel: int = 0) -> None:
         """Request PTZ update for channel"""
-        ...
 
 
 class ReolinkEntryData(TypedDict, total=False):
