@@ -190,9 +190,10 @@ async def async_setup_entry(
     entities = []
     data = coordinator.data
     push_setup = True
+    abilities = data.abilities
 
     for channel in data.channels.keys():
-        ability = coordinator.data.abilities.channels[channel]
+        ability = abilities.channels[channel]
         if not ability.alarm.motion:
             continue
 
@@ -220,15 +221,15 @@ async def async_setup_entry(
 
         ai_types = []
         # if ability.support.ai: <- in my tests this ability was not set
-        if ability.support.ai.animal:
+        if ability.supports.ai.animal:
             ai_types.append(AITypes.ANIMAL)
-        if ability.support.ai.face:
+        if ability.supports.ai.face:
             ai_types.append(AITypes.FACE)
-        if ability.support.ai.people:
+        if ability.supports.ai.people:
             ai_types.append(AITypes.PEOPLE)
-        if ability.support.ai.pet:
+        if ability.supports.ai.pet:
             ai_types.append(AITypes.PET)
-        if ability.support.ai.vehicle:
+        if ability.supports.ai.vehicle:
             ai_types.append(AITypes.VEHICLE)
 
         for description in SENSORS:
@@ -241,7 +242,7 @@ async def async_setup_entry(
     if entities:
         async_add_entities(entities)
 
-    if not push_setup and data.abilities.onvif:
+    if not push_setup and abilities.onvif:
         webhooks = async_get_webhook_manager(hass)
         if webhooks is not None:
             webhook = webhooks.async_register(hass, config_entry)
@@ -269,7 +270,7 @@ async def async_setup_entry(
                         )
                         hass.create_task(_coordinator.async_request_refresh())
                 subscription = None
-                if not bool(coordinator.data.ports.get("onvifEnable", True)):
+                if not coordinator.data.ports.onvif.enabled:
                     coordinator.logger.warning(
                         "ONVIF not enabled for device %s, forcing polling mode",
                         coordinator.data.device.name,
@@ -309,6 +310,7 @@ class ReolinkMotionSensor(ReolinkEntity, BinarySensorEntity):
 
     def _handle_coordinator_update(self) -> None:
         data = self.coordinator.data.motion[self.entity_description.channel]
+        _LOGGER.info("Motion<-%r", data)
         if self.entity_description.ai_type is None:
             self._attr_is_on = data.detected
         else:

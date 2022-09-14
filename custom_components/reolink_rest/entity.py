@@ -1,5 +1,6 @@
 """Reolink Entities"""
 
+from collections import defaultdict
 from datetime import timedelta
 
 from typing import Mapping, Sequence
@@ -24,11 +25,14 @@ from homeassistant.const import (
     CONF_PASSWORD,
 )
 
+from async_reolink.api.ai.typings import AITypes
+from async_reolink.api.system.capabilities import PTZControl, PTZType
 from async_reolink.api.errors import ReolinkResponseError, ErrorCodes
-from async_reolink.api import system, network, ai, alarm, ptz
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
 from async_reolink.rest import Client as ReolinkClient
 from async_reolink.rest.connection import Encryption
+from async_reolink.rest.commands import ai, alarm, network, ptz, system
+
 
 from async_reolink.rest.errors import (
     CONNECTION_ERRORS,
@@ -38,9 +42,8 @@ from async_reolink.rest.errors import (
 from .typing import EntityData
 
 from .models import (
-    MutableMotionData,
-    MutablePTZDisabled,
-    MutablePTZPosition,
+    Motion,
+    PTZ,
     ReolinkEntityDescription,
 )
 
@@ -86,7 +89,7 @@ def _dev_to_info(device: device_registry.DeviceEntry):
 
 
 def _get_channels(
-    abilities: system.abilities.Abilities, options: Mapping[str, any] | None = None
+    abilities: system.Capabilities, options: Mapping[str, any] | None = None
 ):
     channels = set(range(len(abilities.channels)))
     if options:
@@ -94,16 +97,118 @@ def _get_channels(
     return channels
 
 
-class _MutablePTZData:
+class _Motion(Motion):
     def __init__(self) -> None:
-        self.pan = MutablePTZPosition()
-        self.tilt = MutablePTZPosition()
-        self.zoom = MutablePTZPosition()
-        self.focus = MutablePTZPosition()
-        self.autofocus = MutablePTZDisabled()
-        self.presets: dict[ptz.PTZPresetId, ptz.PTZPreset] = {}
-        self.patrol: dict[ptz.PTZPatrolId, ptz.PTZPatrol] = {}
-        self.tattern: dict[ptz.PTZTrackId, ptz.PTZTrack] = {}
+        super().__init__()
+        self._detected = False
+        self._ai = None
+
+    @property
+    def detected(self):
+        return self._detected
+
+    @detected.setter
+    def detected(self, value: bool):
+        self._detected = bool(value)
+
+    def __getitem__(self, __k: AITypes):
+        return (
+            _alarm.state
+            if self._ai is not None and (_alarm := self._ai.get(__k, None)) is not None
+            else False
+        )
+
+    def __iter__(self):
+        return self._ai.__iter__()
+
+    def __len__(self):
+        return self._ai.__len__() if self._ai is not None else 0
+
+    def __repr__(self) -> str:
+        _ai = ""
+        if self._ai is not None:
+            for key, value in self._ai.items():
+                _ai += f"{key}:{value},"
+
+        return f"<{self.__class__.__name__}: detected={self._detected}, ai=<{_ai}>>"
+
+    def update_ai(self, state: ai.models.State):
+        if state is not None and not isinstance(state, ai.models.State):
+            raise TypeError("Invalid value")
+        self._ai = state
+
+
+class _PTZ(PTZ):
+    def __init__(self) -> None:
+        super().__init__()
+
+        self._zf = None
+        self._pan = 0
+        self._tilt = 0
+        self._autofocus = False
+        self._presets = None
+        self._patrol = None
+        self._tattern = None
+
+    @property
+    def pan(self):
+        return self._pan
+
+    @property
+    def tilt(self):
+        return self._tilt
+
+    @property
+    def zoom(self):
+        return self._zf.zoom if self._zf is not None else 0
+
+    @property
+    def focus(self):
+        return self._zf.focus if self._zf is not None else 0
+
+    @property
+    def autofocus(self):
+        return self._autofocus
+
+    @autofocus.setter
+    def autofocus(self, value):
+        self._autofocus = value
+
+    @property
+    def presets(self):
+        return self._presets
+
+    @property
+    def patrol(self):
+        return self._patrol
+
+    @property
+    def tattern(self):
+        return self._tattern
+
+    def update_zf(self, value: ptz.ZoomFocus):
+        """update zoom/focus"""
+        if value is not None and not isinstance(value, ptz.ZoomFocus):
+            raise TypeError("Invalid value")
+        self._zf = value
+
+    def update_presets(self, value: Mapping[int, ptz.Preset]):
+        """update presets"""
+        if value is not None and not isinstance(value, Mapping[int, ptz.Preset]):
+            raise TypeError("Invalid value")
+        self._presets = value
+
+    def update_patrols(self, value: Mapping[int, ptz.Patrol]):
+        """update presets"""
+        if value is not None and not isinstance(value, Mapping[int, ptz.Patrol]):
+            raise TypeError("Invalid value")
+        self._patrol = value
+
+    def update_tracks(self, value: Mapping[int, ptz.Track]):
+        """update presets"""
+        if value is not None and not isinstance(value, Mapping[int, ptz.Track]):
+            raise TypeError("Invalid value")
+        self._tattern = value
 
 
 class ReolinkEntityData:
@@ -115,19 +220,20 @@ class ReolinkEntityData:
         self.client = ReolinkClient()
         self.device: device_registry.DeviceEntry = None
         self.time_difference = timedelta()
-        self.abilities: system.abilities.Abilities = None
-        self.device_info: system.DeviceInfoType = None
+        self.abilities = None
+        self.device_info = None
         self.channels: dict[int, DeviceInfo] = {}
-        self.ports: network.NetworkPortsType = None
+        self.ports = None
         self._batch_ability = True
         self._connection_id = 0
         self._authentication_id = 0
         self.updated_motion: set[int] = set()
         self._update_motion: set[int] = set()
-        self.motion: dict[int, MutableMotionData] = {}
+        self.ai = None
+        self.motion: defaultdict[int, _Motion] = defaultdict(_Motion)
         self.updated_ptz: set[int] = set()
         self._update_ptz: set[int] = set()
-        self.ptz: dict[int, _MutablePTZData] = {}
+        self.ptz: defaultdict[int, _PTZ] = defaultdict(_PTZ)
         discovery: dict = config_entry.options.get(OPT_DISCOVERY, None)
         if discovery is not None and (
             "name" in discovery or "uuid" in discovery or "mac" in discovery
@@ -136,7 +242,7 @@ class ReolinkEntityData:
                 "name", discovery.get("uuid", discovery["mac"])
             )
         else:
-            self._name: str = config_entry[CONF_HOST]
+            self._name: str = config_entry.data[CONF_HOST]
 
     @property
     def name(self):
@@ -144,22 +250,31 @@ class ReolinkEntityData:
         return self._name
 
     def _processes_responses(self, response):
-        if system.GetAbilitiesCommand.is_response(response):
-            self.abilities = system.abilities.Abilities(
-                system.GetAbilitiesCommand.get_value(response)
-            )
+        if isinstance(response, system.GetAbilitiesResponse):
+            if self.abilities is not None:
+                self.abilities.update(response.capabilities)
+            else:
+                self.abilities = response.capabilities
             return True
-        if system.GetTimeCommand.is_response(response):
-            result = system.GetTimeCommand.get_value(response)
-            # pylint: disable=unsubscriptable-object
-            time = system.as_dateime(result["Time"], tzinfo=system.get_tzinfo(result))
+        if isinstance(response, system.GetTimeResponse):
+            result = response
+            time = result.to_datetime()
             self.time_difference = dt.utcnow() - dt.as_utc(time)
             return True
-        if network.GetNetworkPortsCommand.is_response(response):
-            self.ports = network.GetNetworkPortsCommand.get_value(response)
+        if isinstance(response, network.GetNetworkPortsResponse):
+            self.ports = response.ports
             return True
-        if system.GetDeviceInfoCommand.is_response(response):
-            self.device_info = system.GetDeviceInfoCommand.get_value(response)
+        if isinstance(response, system.GetDeviceInfoResponse):
+            if self.device_info is not None:
+                self.device_info.update(response.info)
+            else:
+                self.device_info = response.info
+            return True
+        if isinstance(response, ai.GetAiConfigResponse):
+            if self.ai is not None:
+                self.ai.update(response.config)
+            else:
+                self.ai = response.config
             return True
         return False
 
@@ -172,18 +287,18 @@ class ReolinkEntityData:
         uuid = None
         try:
             async for response in self.client.batch(commands):
-                if network.GetChannelStatusCommand.is_response(response):
-                    channels = network.GetChannelStatusCommand.get_value(response)
-                elif network.GetLocalLinkCommand.is_response(response):
-                    _mac = network.GetLocalLinkCommand.get_value(response)["mac"]
+                if isinstance(response, network.GetChannelStatusResponse):
+                    channels = response.channels
+                elif isinstance(response, network.GetLocalLinkResponse):
+                    _mac = response.local_link.mac
                     if not mac:
                         mac = _mac
                     elif mac.lower() != _mac.lower():
                         raise UpdateFailed(
                             "Found different mac so possible wrong device"
                         )
-                elif network.GetP2PCommand.is_response(response):
-                    _uuid = network.GetP2PCommand.get_value(response)["uid"]
+                elif isinstance(response, network.GetP2PResponse):
+                    _uuid = response.info.uid
                     if not uuid:
                         uuid = _uuid
                     elif uuid.lower() != _uuid.lower():
@@ -216,7 +331,7 @@ class ReolinkEntityData:
             if reoresp.code == ErrorCodes.READ_FAILED and True in (
                 True
                 for command in commands
-                if isinstance(command, system.GetAbilitiesCommand)
+                if isinstance(command, system.GetAbilitiesRequest)
             ):
                 # some cameras do not like to batch in the ability command
                 # we will note this and no do that anymore
@@ -288,6 +403,8 @@ class ReolinkEntityData:
                 )
             except ReolinkResponseError as reoresp:
                 if reoresp.code in AUTH_ERRORCODES:
+                    self._authentication_id = 0
+                    await self.client.disconnect()
                     # this could be because of a reboot or token expiration
                     await self.async_update()
                     return self
@@ -298,33 +415,37 @@ class ReolinkEntityData:
                 raise reoresp
         else:
             commands.append(
-                system.GetAbilitiesCommand(
+                system.GetAbilitiesRequest(
                     self.config_entry.data.get(CONF_USERNAME, None)
                 )
             )
 
-        commands.append(system.GetTimeCommand())
+        commands.append(system.GetTimeRequest())
+        abilities = self.abilities
 
         channels = None
-        commands.append(network.GetNetworkPortsCommand())
+        commands.append(network.GetNetworkPortsRequest())
         mac = None
         uuid = None
-        if self.abilities.devInfo:
-            commands.append(system.GetDeviceInfoCommand())
-            if self.device_info and self.device_info.get("channelNum", 1) > 1:
-                commands.append(network.GetChannelStatusCommand())
+        if abilities.device.info:
+            commands.append(system.GetDeviceInfoRequest())
+            if self.device_info and self.device_info.channels > 1:
+                commands.append(network.GetChannelStatusRequest())
         if self.device is None:
             discovery: dict = self.config_entry.options.get(OPT_DISCOVERY, None)
             mac = discovery["mac"] if discovery and "mac" in discovery else None
-            if self.abilities.localLink:
-                commands.append(network.GetLocalLinkCommand())
+            if abilities.local_link:
+                commands.append(network.GetLocalLinkRequest())
             uuid = discovery["uuid"] if discovery and "uuid" in discovery else None
-            if self.abilities.p2p:
-                commands.append(network.GetP2PCommand())
+            if abilities.p2p:
+                commands.append(network.GetP2PRequest())
         (_, command_channel) = self._create_motion_commands(commands)
         (_, command_channel) = self._create_ptz_commands(
             commands, command_channel=command_channel
         )
+        for i, ability in abilities.channels.items():
+            if ability.supports.ai.detect_config:
+                commands.append(ai.GetAiConfigRequest(i))
 
         self._update_motion.clear()
         self.updated_motion.clear()
@@ -337,11 +458,7 @@ class ReolinkEntityData:
 
         channels, mac, uuid = result
 
-        if (
-            self.device_info
-            and self.device_info.get("channelNum", 0) > 1
-            and channels is None
-        ):
+        if self.device_info and self.device_info.channels > 1 and channels is None:
             channels = await self.client.get_channel_status()
 
         # pylint: disable=unsubscriptable-object
@@ -350,62 +467,67 @@ class ReolinkEntityData:
             self.device = registry.async_get_or_create(
                 config_entry_id=self.config_entry.entry_id,
                 default_manufacturer="Reolink",
-                default_name=self.device_info["name"],
+                default_name=self.device_info.name,
                 identifiers={(DOMAIN, uuid)} if uuid else None,
                 connections={(device_registry.CONNECTION_NETWORK_MAC, mac)}
                 if mac
                 else None,
-                sw_version=self.device_info["firmVer"],
-                hw_version=self.device_info["hardVer"],
-                default_model=self.device_info["model"],
+                sw_version=self.device_info.version.firmware,
+                hw_version=self.device_info.version.hardware,
+                default_model=self.device_info.model,
                 configuration_url=self.client.base_url,
             )
-            if len(self.abilities.channels) < 2:
+            if len(abilities.channels) < 2:
                 self.channels[0] = _dev_to_info(self.device)
         else:
             registry = device_registry.async_get(self.hass)
             updated_device = registry.async_update_device(
                 self.device.id,
-                name=self.device_info["name"],
-                sw_version=self.device_info["firmVer"],
-                hw_version=self.device_info["hardVer"],
+                name=self.device_info.name,
+                sw_version=self.device_info.version.firmware,
+                hw_version=self.device_info.version.hardware,
             )
             if updated_device and updated_device != self.device:
                 self.device = updated_device
-                if len(self.abilities.channels) < 2:
+                if len(abilities.channels) < 2:
                     self.channels[0] = _dev_to_info(updated_device)
 
-        if len(self.abilities.channels) > 1 and channels:
+        if len(abilities.channels) > 1 and channels:
             for i in self.config_entry.options.get(
-                OPT_CHANNELS, list(range(len(self.abilities.channels)))
+                OPT_CHANNELS, list(range(len(abilities.channels)))
             ):
-                status = next(c for c in channels if c["channel"] == i)
-                name = status.get("name", f"Channel {status['channel']}")
+                status = channels.get(i, None)
+                if status is None:
+                    continue
+                # TODO : status.online?
+
+                name = status.name or f"Channel {i}"
                 if self.config_entry.options.get(OPT_PREFIX_CHANNEL, False):
                     name = f"{self.device.name} {name}"
-                if not status["channel"] in self.channels:
+                channel_device = self.channels.get(status.channel_id, None)
+                if channel_device is None:
                     if not registry:
                         registry = device_registry.async_get(self.hass)
                     channel_device = registry.async_get_or_create(
                         config_entry_id=self.config_entry.entry_id,
                         via_device=self.device.identifiers.copy().pop(),
-                        default_model=f"{status.get('typeInfo', '')} Channel {status['channel']}",
+                        default_model=f"{status.type or ''} Channel {status.channel_id}",
                         default_name=name,
-                        identifiers={(DOMAIN, f"{self.device.id}-{status['channel']}")},
+                        identifiers={(DOMAIN, f"{self.device.id}-{status.channel_id}")},
                         default_manufacturer=self.device.manufacturer,
                     )
-                    self.channels[status["channel"]] = _dev_to_info(channel_device)
+                    self.channels[status.channel_id] = _dev_to_info(channel_device)
                 else:
                     if not registry:
                         registry = device_registry.async_get(self.hass)
                     channel_device = registry.async_get_device(
-                        self.channels[status["channel"]]["identifiers"]
+                        self.channels[status.channel_id]["identifiers"]
                     )
                     updated_device = registry.async_update_device(
                         channel_device.id, name=name
                     )
                     if updated_device and updated_device != channel_device:
-                        self.channels[status["channel"]] = _dev_to_info(updated_device)
+                        self.channels[status.channel_id] = _dev_to_info(updated_device)
 
         if (uuid or mac) and OPT_DISCOVERY not in self.config_entry.options:
             options = self.config_entry.options.copy()
@@ -427,11 +549,12 @@ class ReolinkEntityData:
         command_channel: dict[int, int] = None,
         channels: Sequence[int] = None,
     ):
+        abilities = self.abilities
         if commands is None:
             commands = []
         if command_channel is None:
             command_channel = {}
-        if len(self.abilities.channels) == 1:
+        if len(abilities.channels) == 1:
             channels = set({0})
         elif channels is None or len(channels) == 0:
             channels = _get_channels(self.abilities, self.config_entry.options)
@@ -439,46 +562,33 @@ class ReolinkEntityData:
         for i in channels:
             # the MD command does not return the channel it replies to
             command_channel[len(commands)] = i
-            commands.append(alarm.GetMotionStateCommand(i))
-            ability = self.abilities.channels[i]
+            commands.append(alarm.GetMotionStateRequest(i))
+            ability = abilities.channels[i]
             if (
-                ability.support.ai.animal
-                or ability.support.ai.face
-                or ability.support.ai.people
-                or ability.support.ai.pet
-                or ability.support.ai.vehicle
+                ability.supports.ai.animal
+                or ability.supports.ai.face
+                or ability.supports.ai.people
+                or ability.supports.ai.pet
+                or ability.supports.ai.vehicle
             ):
-                commands.append(ai.GetAiStateCommand(i))
+                commands.append(ai.GetAiStateRequest(i))
 
         return (commands, command_channel)
 
     def _process_motion_responses(
         self, response, /, command_index: int, command_channel: dict[int, int]
     ):
-        if alarm.GetMotionStateCommand.is_response(response):
-            state = alarm.GetMotionStateCommand.get_value(response)
+        if isinstance(response, alarm.GetMotionStateResponse):
+            state = response.state
             channel = command_channel[command_index]
             self.updated_motion.add(channel)
-            if channel not in self.motion:
-                self.motion.setdefault(channel, MutableMotionData())
-            self.motion[channel].detected = bool(state)
+            self.motion[channel].detected = state
             return True
-        if ai.GetAiStateCommand.is_response(response):
-            state = ai.GetAiStateCommand.get_value(response)
-            channel = state["channel"]  # pylint: disable=unsubscriptable-object
+        if isinstance(response, ai.GetAiStateResponse):
+            state = response.state
+            channel = response.channel_id
             self.updated_motion.add(channel)
-            if ai.AITypes.is_ai_response_values(state):
-                for (_type, value) in state.items():
-                    if (
-                        isinstance(value, dict)
-                        and value["support"]
-                        and _type in (e.value for e in ai.AITypes)
-                    ):
-                        if channel not in self.motion:
-                            self.motion.setdefault(channel, MutableMotionData())
-                        self.motion[channel][ai.AITypes(_type)] = bool(
-                            value["alarm_state"]
-                        )
+            self.motion[channel].update_ai(state)
             return True
         return False
 
@@ -505,106 +615,56 @@ class ReolinkEntityData:
         command_channel: dict[int, int] = None,
         channels: set[int] = None,
     ):
+        abilities = self.abilities
         if commands is None:
             commands = []
         if command_channel is None:
             command_channel = {}
-        if len(self.abilities.channels) == 1:
+        if len(abilities.channels) == 1:
             channels = set({0})
         elif channels is None or len(channels) == 0:
             channels = _get_channels(self.abilities, self.config_entry.options)
 
         for i in channels:
-            ability = self.abilities.channels[i]
-            if ability.ptz.control in (
-                system.abilities.channel.PTZControlValues.ZOOM,
-                system.abilities.channel.PTZControlValues.ZOOM_FOCUS,
-            ):
-                commands.append(ptz.GetPTZZoomFocusCommand(i))
-            if ability.ptz.type == system.abilities.channel.PTZTypeValues.AF:
+            ability = abilities.channels[i]
+            if ability.ptz.control in (PTZControl.ZOOM, PTZControl.ZOOM_FOCUS):
+                commands.append(ptz.GetZoomFocusRequest(i))
+            if ability.ptz.type == PTZType.AF:
                 command_channel[len(commands)] = i
-                commands.append(ptz.GetPTZAutoFocusCommand(i))
+                commands.append(ptz.GetAutoFocusRequest(i))
             if ability.ptz.patrol:
-                commands.append(ptz.GetPTZPatrolCommand(i))
+                commands.append(ptz.GetPatrolRequest(i))
             if ability.ptz.tattern:
-                commands.append(ptz.GetPTZTatternCommand(i))
+                commands.append(ptz.GetTatternRequest(i))
         return (commands, command_channel)
 
     def _process_ptz_responses(
         self, response, /, command_index: int, command_channel: dict[int, int]
     ):
-        if ptz.GetPTZAutoFocusCommand.is_response(response):
-            value = ptz.GetPTZAutoFocusCommand.get_value(response)
+        if isinstance(response, ptz.GetAutoFocusResponse):
             channel = command_channel[command_index]
             self.updated_ptz.add(channel)
-            if channel not in self.ptz:
-                data = self.ptz.setdefault(channel, _MutablePTZData())
-            else:
-                data = self.ptz[channel]
-            data.autofocus.disabled = value["disable"]
+            self.ptz[channel].autofocus = not response.disabled
             return True
-        if ptz.GetPTZZoomFocusCommand.is_response(response):
-            value = ptz.GetPTZZoomFocusCommand.get_value(response)
-            channel = value["channel"]
+        if isinstance(response, ptz.GetZoomFocusResponse):
+            channel = response.channel_id
             self.updated_ptz.add(channel)
-            if channel not in self.ptz:
-                data = self.ptz.setdefault(channel, _MutablePTZData())
-            else:
-                data = self.ptz[channel]
-            if "zoom" in value:
-                data.zoom.value = value["zoom"].get("pos", 0)
-            else:
-                data.zoom.value = 0
-            if "focus" in value:
-                data.focus.value = value["focus"].get("pos", 0)
-            else:
-                data.focus.value = 0
+            self.ptz[channel].update_zf(response.state)
             return True
-        if ptz.GetPTZPresetCommand.is_response(response):
-            for preset in ptz.GetPTZPresetCommand.get_value(response):
-                channel = preset["channel"]
-                self.updated_ptz.add(channel)
-                if channel not in self.ptz:
-                    data = self.ptz.setdefault(channel, _MutablePTZData())
-                else:
-                    data = self.ptz[channel]
-                if data.presets is None:
-                    data.presets = {}
-                if preset["id"] in data.presets:
-                    data.presets[preset["id"]].update(**preset)
-                else:
-                    data.presets[preset["id"]] = ptz.PTZPreset(**preset)
-
+        if isinstance(response, ptz.GetPresetResponse):
+            channel = response.channel_id
+            self.updated_ptz.add(channel)
+            self.ptz[channel].update_presets(response.presets)
             return True
-        if ptz.GetPTZPatrolCommand.is_response(response):
-            for track in ptz.GetPTZPatrolCommand.get_value(response):
-                channel = track["channel"]
-                self.updated_ptz.add(channel)
-                if channel not in self.ptz:
-                    data = self.ptz.setdefault(channel, _MutablePTZData())
-                else:
-                    data = self.ptz[channel]
-                if data.patrol is None:
-                    data.patrol = {}
-                if track["id"] in data.patrol:
-                    data.patrol[track["id"]].update(**track)
-                else:
-                    data.patrol[track["id"]] = ptz.PTZPatrol(**track)
+        if isinstance(response, ptz.GetPatrolResponse):
+            channel = response.channel_id
+            self.updated_ptz.add(channel)
+            self.ptz[channel].update_patrols(response.patrols)
             return True
-        if ptz.GetPTZTatternCommand.is_response(response):
-            for track in ptz.GetPTZTatternCommand.get_value(response):
-                channel = track["channel"]
-                self.updated_ptz.add(channel)
-                if channel not in self.ptz:
-                    data = self.ptz.setdefault(channel, _MutablePTZData())
-                else:
-                    data = self.ptz[channel]
-                if data.tattern is None:
-                    data.tattern = {}
-                if track["id"] in data.tattern:
-                    data.tattern[track["id"]].update(**track)
-                else:
-                    data.tattern[track["id"]] = ptz.PTZPatrol(**track)
+        if isinstance(response, ptz.GetTatternResponse):
+            channel = response.channel_id
+            self.updated_ptz.add(channel)
+            self.ptz[channel].update_tracks(response.tracks)
             return True
         return False
 
