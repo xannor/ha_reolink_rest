@@ -6,6 +6,7 @@ import asyncio
 import base64
 from dataclasses import asdict, dataclass
 from datetime import timedelta, datetime
+from enum import Enum
 import hashlib
 
 import logging
@@ -25,8 +26,6 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.singleton import singleton
 from homeassistant.util import dt
 
-from homeassistant.backports.enum import StrEnum
-
 from homeassistant.const import CONF_HOST, CONF_USERNAME, CONF_PASSWORD
 
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
@@ -43,7 +42,7 @@ STORE_VERSION: Final = 1
 _LOGGER = logging.getLogger(__name__)
 
 
-class _Namespaces(StrEnum):
+class _Namespaces(str, Enum):
 
     SOAP_ENV = "http://www.w3.org/2003/05/soap-envelope"
     WSNT = "http://docs.oasis-open.org/wsn/b-2"
@@ -378,10 +377,17 @@ class PushManager:
         self._renew_task = loop.call_later(delay, _task)
 
     async def _process_subscription(
-        self, response: et.Element, entry_id: str, save: bool = True
+        self,
+        response: et.Element,
+        reference: str | None,
+        entry_id: str,
+        save: bool = True,
     ):
-        reference = _find(_Namespaces.WSNT.tag("SubscriptionReference"), response)
-        reference = _text(_find(_Namespaces.WSA.tag("Address"), reference), reference)
+        if reference is None:
+            reference = _find(_Namespaces.WSNT.tag("SubscriptionReference"), response)
+            reference = _text(
+                _find(_Namespaces.WSA.tag("Address"), reference), reference
+            )
         time = _text(_find(_Namespaces.WSNT.tag("CurrentTime"), response))
         expires = _text(_find(_Namespaces.WSNT.tag("TerminationTime"), response))
         if not reference or not time:
@@ -455,7 +461,7 @@ class PushManager:
             return None
 
         response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
-        return await self._process_subscription(response, entry_id, save)
+        return await self._process_subscription(response, None, entry_id, save)
 
     async def _renew(
         self,
@@ -512,8 +518,8 @@ class PushManager:
             self._handle_failed_subscription(url, entry_id, save)
             return None
 
-        response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
-        return await self._process_subscription(response, entry_id, save)
+        response = response.find(f".//{_Namespaces.WSNT.tag('RenewResponse')}")
+        return await self._process_subscription(response, manager_url, entry_id, save)
 
     async def _unsubscribe(self, entry_id: str, save: bool = True):
         if entry_id == self._renew_id:

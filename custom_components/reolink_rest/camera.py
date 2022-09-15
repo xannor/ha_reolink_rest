@@ -28,8 +28,9 @@ from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
 from async_reolink.api.errors import ReolinkResponseError
 
+from async_reolink.api.typings import StreamTypes
+
 from async_reolink.api.const import (
-    IntStreamTypes as StreamTypes,
     DEFAULT_USERNAME,
     DEFAULT_PASSWORD,
 )
