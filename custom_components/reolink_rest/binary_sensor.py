@@ -259,9 +259,12 @@ async def async_setup_entry(
                     for coordinator in coordinators.values():
                         coordinator.update_interval = None
 
+            resub_cleanup = None
+            onvif_warned = False
+
             def _sub_failure(entry_id: str):
-                nonlocal subscription
-                if entry_id != config_entry.entry_id:
+                nonlocal subscription, resub_cleanup, onvif_warned
+                if entry_id != config_entry.entry_id or config_entry.data is None:
                     return
                 if subscription is not None:
                     for _coordinator in coordinators.values():
@@ -270,24 +273,29 @@ async def async_setup_entry(
                         )
                         hass.create_task(_coordinator.async_request_refresh())
                 subscription = None
-                if not coordinator.data.ports.onvif.enabled:
+                if not coordinator.data.ports.onvif.enabled and not onvif_warned:
+                    onvif_warned = True
                     coordinator.logger.warning(
                         "ONVIF not enabled for device %s, forcing polling mode",
                         coordinator.data.device.name,
                     )
 
                 def _sub_resub():
-                    cleanup()
+                    nonlocal resub_cleanup
+                    resub_cleanup()
+                    resub_cleanup = None
                     hass.create_task(_async_sub())
 
-                cleanup = coordinator.async_add_listener(_sub_resub)
+                resub_cleanup = coordinator.async_add_listener(_sub_resub)
 
-            cleanup = push.async_on_subscription_failure(_sub_failure)
+            sub_fail_cleanup = push.async_on_subscription_failure(_sub_failure)
 
             await _async_sub()
 
             def _unsubscribe():
-                cleanup()
+                sub_fail_cleanup()
+                if resub_cleanup is not None:
+                    resub_cleanup()  # pylint: disable=not-callable
                 if subscription is not None:
                     hass.create_task(push.async_unsubscribe(subscription))
 

@@ -304,6 +304,12 @@ async def async_setup_entry(
                     and description.stream_type == StreamTypes.MAIN
                     and ability.main_encoding == abilities.EncodingType.H265
                 ):
+                    coordinator.logger.warning(
+                        "Channel (%s) is H265 so skipping (%s) (%s) as it is not supported",
+                        coordinator.data.channels[channel]["name"],
+                        description.output_type.name,
+                        description.stream_type.name,
+                    )
                     continue
                 if (
                     not description.output_type in otypes
@@ -329,6 +335,24 @@ async def async_setup_entry(
                         description.entity_registry_enabled_default = False
                     else:
                         description.entity_registry_visible_default = False
+
+                if description.entity_registry_enabled_default and (
+                    (
+                        description.output_type == OutputStreamTypes.RTSP
+                        and not coordinator.data.ports.rtsp.enabled
+                    )
+                    or (
+                        description.output_type == OutputStreamTypes.RTMP
+                        and not coordinator.data.ports.rtmp.enabled
+                    )
+                ):
+                    description.entity_registry_enabled_default = False
+                    coordinator.logger.warning(
+                        "(%s) is disabled on device (%s) so (%s) stream will be disabled",
+                        description.output_type.name,
+                        coordinator.data.device.name,
+                        description.stream_type.name,
+                    )
 
                 entities.append(
                     ReolinkCamera(
@@ -356,24 +380,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
         ReolinkEntity.__init__(self, coordinator, description, context)
         self._attr_supported_features = supported_features
         self._snapshot_task: Task[bytes | None] = None
-        if (
-            self.entity_description.output_type == OutputStreamTypes.RTSP
-            and not self.coordinator.data.ports.rtsp.enabled
-        ):
-            self._attr_available = False
-            self.coordinator.logger.error(
-                "RTSP is disabled on device (%s) camera will be unavailable",
-                self.coordinator.data.device.name,
-            )
-        elif (
-            self.entity_description.output_type == OutputStreamTypes.RTMP
-            and not self.coordinator.data.ports.rtmp.enabled
-        ):
-            self._attr_available = False
-            self.coordinator.logger.error(
-                "RTMP is disabled on device (%s) camera will be unavailable",
-                self.coordinator.data.device.name,
-            )
+        self._port_disabled_warn = False
 
     async def stream_source(self) -> str | None:
         domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
@@ -470,6 +477,15 @@ class ReolinkCamera(ReolinkEntity, Camera):
             self._attr_available = self.coordinator.data.ports.rtsp.enabled
         elif self.entity_description.output_type == OutputStreamTypes.RTMP:
             self._attr_available = self.coordinator.data.ports.rtmp.enabled
+        if not self._attr_available and not self._port_disabled_warn:
+            self._port_disabled_warn = True
+            self.coordinator.logger.error(
+                "(%s) is disabled on device (%s) so (%s) stream will be unavailable",
+                self.entity_description.output_type.name,
+                self.coordinator.data.device.name,
+                self.entity_description.stream_type.name,
+            )
+
         return super()._handle_coordinator_update()
 
     async def async_set_zoom(self, position: int):

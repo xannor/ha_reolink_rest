@@ -198,6 +198,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except Exception:  # pylint: disable=broad-except
             return await self.async_step_connection(data, {"base": "unknown exception"})
 
+        connection_id = client.connection_id
         title = (self.init_data or {}).get("name", "Camera")
         try:
             if not await client.login(
@@ -214,6 +215,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if CONF_USERNAME in data:
                     errors = {"base": "invalid_auth"}
                 return await self.async_step_auth(data, errors)
+
+            # check to see if login redirected us and update the base_url
+            if client.connection_id != connection_id:
+                connection_id = client.connection_id
+                _user_data = {CONF_HOST: client.base_url}
+                if _validate_connection_data(_user_data):
+                    _user_data = dict(
+                        dslice(_user_data, CONF_HOST, CONF_PORT, CONF_USE_HTTPS)
+                    )
+                    data.update(_user_data)
+                    _LOGGER.warning(
+                        "Corrected camera(%s) port during setup, you can safely ignore previous warnings about redirecting.",
+                        data[CONF_HOST],
+                    )
 
             abilities = await client.get_ability(
                 data.get(CONF_USERNAME, DEFAULT_USERNAME)
@@ -298,16 +313,9 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self.options is None:
             self.options = {}
         self.options[OPT_DISCOVERY] = discovery_info
-        return await super().async_step_integration_discovery(discovery_info)
 
-    async def async_step_discovery(
-        self, discovery_info: DiscoveryInfoType
-    ) -> FlowResult:
-        if discovery_info is not None:
-            await self._async_handle_discovery_without_unique_id()
-            return self.async_show_progress_done(next_step_id="user")
-
-        return super().async_step_discovery(discovery_info)
+        await self._async_handle_discovery_without_unique_id()
+        return self.async_show_progress_done(next_step_id="user")
 
     async def async_step_connection(
         self,
