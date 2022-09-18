@@ -32,7 +32,6 @@ from .entity import (
     ReolinkEntity,
     ReolinkEntityData,
     ReolinkEntityDataUpdateCoordinator,
-    ReolinkEntityDescription,
     async_get_motion_poll_interval,
 )
 
@@ -46,49 +45,42 @@ DATA_MOTION_DEBOUNCE: Final = "onvif_motion_debounce"
 
 
 @dataclass
-class ReolinkMotionSensorEntityDescription(
-    ReolinkEntityDescription, BinarySensorEntityDescription
-):
+class ReolinkMotionSensorEntityDescription(BinarySensorEntityDescription):
     """Describe Reolink Motion Sensor Entity"""
 
+    has_entity_name: bool = True
     ai_type: AITypes | None = None
     device_class: BinarySensorDeviceClass | str | None = BinarySensorDeviceClass.MOTION
 
 
-SENSORS: Final = [
+MOTION_SENSORS: Final = [
     ReolinkMotionSensorEntityDescription(
         key="motion_general",
         name="Motion",
-        has_entity_name=True,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_animal",
         name="Animal",
-        has_entity_name=True,
         ai_type=AITypes.ANIMAL,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_face",
         name="Face",
-        has_entity_name=True,
         ai_type=AITypes.FACE,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_person",
         name="Person",
-        has_entity_name=True,
         ai_type=AITypes.PEOPLE,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_pet",
         name="Pet",
-        has_entity_name=True,
         ai_type=AITypes.PET,
     ),
     ReolinkMotionSensorEntityDescription(
         key="motion_ai_vehicle",
         name="Vehicle",
-        has_entity_name=True,
         ai_type=AITypes.VEHICLE,
     ),
 ]
@@ -182,7 +174,7 @@ async def async_setup_entry(
 
         motion_coordinator.async_add_listener = _add_listener
 
-    _LOGGER.debug("Setting up motion")
+    _LOGGER.debug("Setting up binary sensors")
     domain_data: ReolinkDomainData = hass.data[DOMAIN]
     entry_data = domain_data[config_entry.entry_id]
     coordinator = entry_data[DATA_COORDINATOR]
@@ -198,26 +190,6 @@ async def async_setup_entry(
             continue
 
         push_setup = False
-        coordinators = entry_data.setdefault(DATA_MOTION_COORDINATORS, {})
-        if channel not in coordinators:
-            motion_coordinator = DataUpdateCoordinator(
-                hass,
-                _LOGGER,
-                name=f"{coordinator.name}-motion",
-                update_interval=async_get_motion_poll_interval(config_entry),
-                update_method=cast(
-                    ReolinkEntityData, coordinator.data
-                ).async_update_motion_data,
-            )
-            coordinators[channel] = motion_coordinator
-            motion_coordinator.data = data
-
-            _setup_hooks(channel, motion_coordinator)
-
-        else:
-            motion_coordinator: ReolinkEntityDataUpdateCoordinator = coordinators[
-                channel
-            ]
 
         ai_types = []
         # if ability.support.ai: <- in my tests this ability was not set
@@ -232,12 +204,36 @@ async def async_setup_entry(
         if ability.supports.ai.vehicle:
             ai_types.append(AITypes.VEHICLE)
 
-        for description in SENSORS:
+        motion_coordinator = None
+        for description in MOTION_SENSORS:
             if description.ai_type is not None and description.ai_type not in ai_types:
                 continue
-            description = ReolinkMotionSensorEntityDescription(**asdict(description))
-            description.channel = channel
-            entities.append(ReolinkMotionSensor(motion_coordinator, description))
+
+            if motion_coordinator is None:
+                coordinators = entry_data.setdefault(DATA_MOTION_COORDINATORS, {})
+                if channel not in coordinators:
+                    motion_coordinator = DataUpdateCoordinator(
+                        hass,
+                        _LOGGER,
+                        name=f"{coordinator.name}-motion",
+                        update_interval=async_get_motion_poll_interval(config_entry),
+                        update_method=cast(
+                            ReolinkEntityData, coordinator.data
+                        ).async_update_motion_data,
+                    )
+                    coordinators[channel] = motion_coordinator
+                    motion_coordinator.data = data
+
+                    _setup_hooks(channel, motion_coordinator)
+
+                else:
+                    motion_coordinator: ReolinkEntityDataUpdateCoordinator = (
+                        coordinators[channel]
+                    )
+
+            entities.append(
+                ReolinkMotionSensor(motion_coordinator, description, channel)
+            )
 
     if entities:
         async_add_entities(entities)
@@ -311,13 +307,15 @@ class ReolinkMotionSensor(ReolinkEntity, BinarySensorEntity):
         self,
         coordinator: ReolinkEntityDataUpdateCoordinator,
         description: ReolinkMotionSensorEntityDescription,
+        channel_id: int,
         context: any = None,
     ) -> None:
         BinarySensorEntity.__init__(self)
-        ReolinkEntity.__init__(self, coordinator, description, context)
+        ReolinkEntity.__init__(self, coordinator, channel_id, context)
+        self.entity_description = description
 
     def _handle_coordinator_update(self) -> None:
-        data = self.coordinator.data.motion[self.entity_description.channel]
+        data = self.coordinator.data.motion[self._channel_id]
         _LOGGER.info("Motion<-%r", data)
         if self.entity_description.ai_type is None:
             self._attr_is_on = data.detected

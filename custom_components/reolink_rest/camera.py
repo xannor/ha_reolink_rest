@@ -3,20 +3,18 @@
 from __future__ import annotations
 from asyncio import Task
 from dataclasses import asdict, dataclass
-from enum import IntEnum, IntFlag, auto
+from enum import IntEnum, auto
 import logging
 from typing import Final
 from urllib.parse import quote
 
-import voluptuous as vol
 
-from homeassistant.core import HomeAssistant, CALLBACK_TYPE
-from homeassistant.config_entries import ConfigEntry, DiscoveryInfoType
+from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import (
     AddEntitiesCallback,
-    async_get_current_platform,
+    # async_get_current_platform,
 )
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from homeassistant.components.camera import (
     Camera,
@@ -35,14 +33,11 @@ from async_reolink.api.const import (
     DEFAULT_PASSWORD,
 )
 
-from async_reolink.api.system import capabilities as abilities
-from async_reolink.api.ptz import typings as ptz
+from async_reolink.api.system import capabilities
 
 from .entity import (
-    ReolinkEntityData,
     ReolinkEntityDataUpdateCoordinator,
     ReolinkEntity,
-    ReolinkEntityDescription,
 )
 
 from .typing import ReolinkDomainData
@@ -61,9 +56,10 @@ class OutputStreamTypes(IntEnum):
 
 
 @dataclass
-class ReolinkCameraEntityDescription(ReolinkEntityDescription, CameraEntityDescription):
+class ReolinkCameraEntityDescription(CameraEntityDescription):
     """Describe Reolink Camera Entity"""
 
+    has_entity_name: bool = True
     output_type: OutputStreamTypes = OutputStreamTypes.JPEG
     stream_type: StreamTypes = StreamTypes.MAIN
 
@@ -81,14 +77,12 @@ CAMERAS: Final = [
                 "camera_rtmp_main",
                 name="RTMP Main",
                 output_type=OutputStreamTypes.RTMP,
-                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtmp_sub",
                 name="RTMP Sub",
                 output_type=OutputStreamTypes.RTMP,
                 stream_type=StreamTypes.SUB,
-                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtmp_ext",
@@ -101,80 +95,48 @@ CAMERAS: Final = [
                 "camera_rtsp_main",
                 name="RTSP Main",
                 output_type=OutputStreamTypes.RTSP,
-                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtsp_sub",
                 name="RTSP Sub",
                 output_type=OutputStreamTypes.RTSP,
                 stream_type=StreamTypes.SUB,
-                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_rtsp_ext",
                 name="RTSP Extra",
                 output_type=OutputStreamTypes.RTSP,
                 stream_type=StreamTypes.EXT,
-                has_entity_name=True,
             ),
         ],
     ),
     (
         _NO_FEATURE,
         [
-            ReolinkCameraEntityDescription(
-                "camera_mjpeg_main", name="Snapshot Main", has_entity_name=True
-            ),
+            ReolinkCameraEntityDescription("camera_mjpeg_main", name="Snapshot Main"),
             ReolinkCameraEntityDescription(
                 "camera_mjpeg_sub",
                 name="Snapshot Sub",
                 stream_type=StreamTypes.SUB,
-                has_entity_name=True,
             ),
             ReolinkCameraEntityDescription(
                 "camera_mjpeg_ext",
                 name="Snapshot Extra",
                 stream_type=StreamTypes.EXT,
-                has_entity_name=True,
             ),
         ],
     ),
 ]
 
+# async def async_setup_platform(
+#     _hass: HomeAssistant,
+#     _config_entry: ConfigEntry,
+#     _async_add_entities: AddEntitiesCallback,
+#     _discovery_info: DiscoveryInfoType | None = None,
+# ):
+#     """Setup camera platform"""
 
-class ReolinkCameraEntityFeature(IntFlag):
-    """Reolink Camera Entity Features"""
-
-    PAN_TILT = 1 << 8
-    ZOOM = 2 << 8
-    FOCUS = 3 << 8
-
-
-async def async_setup_platform(
-    _hass: HomeAssistant,
-    _config_entry: ConfigEntry,
-    _async_add_entities: AddEntitiesCallback,
-    _discovery_info: DiscoveryInfoType | None = None,
-):
-    """Setup camera platform"""
-
-    platform = async_get_current_platform()
-
-    platform.async_register_entity_service(
-        "set_zoom",
-        vol.Schema({"position": int}),
-        "async_set_zoom",
-        [ReolinkCameraEntityFeature.ZOOM.value],
-    )
-
-    platform.async_register_entity_service(
-        "set_focus",
-        vol.Schema({"position": int}),
-        "async_set_focus",
-        [ReolinkCameraEntityFeature.FOCUS.value],
-    )
-
-    # PTZ services: pan tilt (4 or 8 direction) zoom and focus
+#     platform = async_get_current_platform()
 
 
 async def async_setup_entry(
@@ -201,21 +163,6 @@ async def async_setup_entry(
 
         features: int = 0
 
-        has_ptz = False
-        if ability.ptz.type == abilities.PTZType.AF:
-            features = (
-                ReolinkCameraEntityFeature.ZOOM.value | ReolinkCameraEntityFeature.FOCUS
-            )
-            has_ptz = True
-        elif ability.ptz.type:
-            has_ptz = True
-            features = ReolinkCameraEntityFeature.PAN_TILT.value
-            if ability.ptz.type in (
-                abilities.PTZType.PTZ,
-                abilities.PTZType.PTZ_NO_SPEED,
-            ):
-                features |= ReolinkCameraEntityFeature.ZOOM.value
-
         otypes: list[OutputStreamTypes] = []
         if ability.snap:
             otypes.append(OutputStreamTypes.JPEG)
@@ -227,73 +174,16 @@ async def async_setup_entry(
 
         stypes: list[StreamTypes] = []
         if ability.live in (
-            abilities.Live.MAIN_EXTERN_SUB,
-            abilities.Live.MAIN_SUB,
+            capabilities.Live.MAIN_EXTERN_SUB,
+            capabilities.Live.MAIN_SUB,
         ):
             stypes.append(StreamTypes.MAIN)
             stypes.append(StreamTypes.SUB)
-        if ability.live == abilities.Live.MAIN_EXTERN_SUB:
+        if ability.live == capabilities.Live.MAIN_EXTERN_SUB:
             stypes.append(StreamTypes.EXT)
 
         if not otypes or not stypes:
             continue
-
-        ptz_coordinator = coordinator
-        if has_ptz:
-            coordinators: dict[
-                int, ReolinkEntityDataUpdateCoordinator
-            ] = _entry_data.setdefault("ptz_coordinators", {})
-            if channel not in coordinators:
-
-                def _create_coordinator(channel: int):
-                    entity_data: ReolinkEntityData = coordinator.data
-
-                    async def _update_data():
-                        entity_data.async_request_ptz_update(channel)
-                        return await entity_data.async_update_ptz_data()
-
-                    _coordinator = DataUpdateCoordinator(
-                        hass,
-                        _LOGGER,
-                        name=f"{coordinator.name}-ptz",
-                        update_method=_update_data,
-                    )
-                    _coordinator.data = data
-
-                    add_listener = _coordinator.async_add_listener
-
-                    def _coord_update():
-                        if channel in coordinator.data.updated_motion:
-                            _coordinator.async_set_updated_data(coordinator.data)
-
-                    coord_cleanup = None
-
-                    def _add_listener(
-                        update_callback: CALLBACK_TYPE, context: any = None
-                    ):
-                        nonlocal coord_cleanup
-                        # pylint: disable = protected-access
-                        if len(_coordinator._listeners) == 0:
-                            coord_cleanup = coordinator.async_add_listener(
-                                _coord_update
-                            )
-
-                        cleanup = add_listener(update_callback, context)
-
-                        def _cleanup():
-                            cleanup()
-                            if len(_coordinator._listeners) == 0:
-                                coord_cleanup()
-
-                        return _cleanup
-
-                    _coordinator.async_add_listener = _add_listener
-
-                    return _coordinator
-
-                coordinators[channel] = ptz_coordinator = _create_coordinator(channel)
-            else:
-                ptz_coordinator = coordinators[channel]
 
         main: OutputStreamTypes = None
         first: OutputStreamTypes = None
@@ -302,7 +192,7 @@ async def async_setup_entry(
                 if (
                     description.output_type == OutputStreamTypes.RTMP
                     and description.stream_type == StreamTypes.MAIN
-                    and ability.main_encoding == abilities.EncodingType.H265
+                    and ability.main_encoding == capabilities.EncodingType.H265
                 ):
                     coordinator.logger.warning(
                         "Channel (%s) is H265 so skipping (%s) (%s) as it is not supported",
@@ -318,7 +208,6 @@ async def async_setup_entry(
                     continue
 
                 description = ReolinkCameraEntityDescription(**asdict(description))
-                description.channel = channel
 
                 if description.stream_type == StreamTypes.MAIN:
                     if not main:
@@ -356,7 +245,7 @@ async def async_setup_entry(
 
                 entities.append(
                     ReolinkCamera(
-                        ptz_coordinator, camera_info[0] | features, description
+                        coordinator, camera_info[0] | features, description, channel
                     )
                 )
 
@@ -374,11 +263,16 @@ class ReolinkCamera(ReolinkEntity, Camera):
         coordinator: ReolinkEntityDataUpdateCoordinator,
         supported_features: int,
         description: ReolinkCameraEntityDescription,
+        channel_id: int,
         context: any = None,
     ) -> None:
         Camera.__init__(self)
-        ReolinkEntity.__init__(self, coordinator, description, context)
+        ReolinkEntity.__init__(self, coordinator, channel_id, context)
+        self.entity_description = description
         self._attr_supported_features = supported_features
+        self._attr_extra_state_attributes["output_type"] = description.output_type.name
+        self._attr_extra_state_attributes["stream_type"] = description.output_type.name
+
         self._snapshot_task: Task[bytes | None] = None
         self._port_disabled_warn = False
 
@@ -391,7 +285,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
         if self.entity_description.output_type == OutputStreamTypes.RTSP:
             try:
                 url = await client.get_rtsp_url(
-                    self.entity_description.channel, self.entity_description.stream_type
+                    self._channel_id, self.entity_description.stream_type
                 )
             except Exception:
                 self.hass.create_task(self.coordinator.async_request_refresh())
@@ -407,7 +301,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
         elif self.entity_description.output_type == OutputStreamTypes.RTMP:
             try:
                 url = await client.get_rtmp_url(
-                    self.entity_description.channel, self.entity_description.stream_type
+                    self._channel_id, self.entity_description.stream_type
                 )
             except Exception:
                 self.hass.create_task(self.coordinator.async_request_refresh())
@@ -434,7 +328,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
             DATA_COORDINATOR
         ].data.client
         try:
-            image = await client.get_snap(self.entity_description.channel)
+            image = await client.get_snap(self._channel_id)
         except ReolinkResponseError as resperr:
             _LOGGER.exception(
                 "Failed to capture snapshot (%s: %s)", resperr.code, resperr.details
@@ -452,9 +346,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        ability = self.coordinator.data.abilities.channels[
-            self.entity_description.channel
-        ]
+        ability = self.coordinator.data.abilities.channels[self._channel_id]
         if not ability.snap:
             return await super().async_camera_image(width, height)
 
@@ -487,17 +379,3 @@ class ReolinkCamera(ReolinkEntity, Camera):
             )
 
         return super()._handle_coordinator_update()
-
-    async def async_set_zoom(self, position: int):
-        """Set Zoom"""
-        client = self.coordinator.data.client
-        await client.set_ptz_zoomfocus(
-            ptz.ZoomOperation.ZOOM, position, self.entity_description.channel
-        )
-
-    async def async_set_focus(self, position: int):
-        """Set Focus"""
-        client = self.coordinator.data.client
-        await client.set_ptz_zoomfocus(
-            ptz.ZoomOperation.FOCUS, position, self.entity_description.channel
-        )

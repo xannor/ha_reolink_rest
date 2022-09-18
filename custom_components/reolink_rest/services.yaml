@@ -4,3 +4,16 @@ reboot:
   target:
     device:
       integration: reolink_rest
+
+set_position:
+  name: Set Position
+  description: Change position of Reolink PTZ device
+  target:
+    device:
+      integration: reolink_rest
+  fields:
+    position:
+      name: Position
+      required: true
+      example: 12
+      default: 0

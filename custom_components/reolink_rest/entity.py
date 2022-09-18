@@ -12,7 +12,7 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 from homeassistant.helpers import device_registry
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityDescription
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.util import dt
 
@@ -44,7 +44,6 @@ from .typing import EntityData
 from .models import (
     Motion,
     PTZ,
-    ReolinkEntityDescription,
 )
 
 from .const import (
@@ -696,25 +695,37 @@ ReolinkEntityDataUpdateCoordinator = DataUpdateCoordinator[EntityData]
 class ReolinkEntity(CoordinatorEntity[ReolinkEntityDataUpdateCoordinator]):
     """Reolink Entity"""
 
-    entity_description: ReolinkEntityDescription
+    _channel_id: int
 
     def __init__(
         self,
         coordinator: ReolinkEntityDataUpdateCoordinator,
-        description: ReolinkEntityDescription,
+        channel_id: int,
         context: any = None,
     ) -> None:
         super().__init__(coordinator, context)
-        self.entity_description = description
-        self._attr_device_info = self.coordinator.data.channels[
-            self.entity_description.channel
-        ]
-        self._attr_unique_id = self.coordinator.config_entry.unique_id
-        self._attr_unique_id += f"_ch_{description.channel}"
-        self._attr_unique_id += f"_{description.key}"
+        self._channel_id = channel_id
+        self._attr_device_info = self.coordinator.data.channels[channel_id]
+        self._attr_extra_state_attributes = {"channel": channel_id}
 
     def _handle_coordinator_update(self) -> None:
-        self._attr_device_info = self.coordinator.data.channels[
-            self.entity_description.channel
-        ]
+        self._attr_device_info = self.coordinator.data.channels[self._channel_id]
         return super()._handle_coordinator_update()
+
+    @property
+    def unique_id(self):
+        if self._attr_unique_id is None:
+            uid = (
+                self.coordinator.config_entry.unique_id
+                or self.coordinator.config_entry.entry_id
+            )
+            uid += f"_ch_{self._channel_id}"
+            if hasattr(self, "entity_description"):
+                uid += f"_{self.entity_description.key}"
+            self._attr_unique_id = uid
+        return super().unique_id
+
+    @property
+    def channel_id(self):
+        """channel id"""
+        return self._channel_id

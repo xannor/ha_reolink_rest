@@ -30,7 +30,12 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: Final = [Platform.CAMERA, Platform.BINARY_SENSOR]
+PLATFORMS: Final = [
+    Platform.CAMERA,
+    Platform.BINARY_SENSOR,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
