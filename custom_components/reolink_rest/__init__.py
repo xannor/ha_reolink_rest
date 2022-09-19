@@ -33,7 +33,8 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: Final = [
     Platform.CAMERA,
     Platform.BINARY_SENSOR,
-    Platform.SENSOR,
+    Platform.NUMBER,
+    # Platform.SENSOR,
     Platform.SWITCH,
 ]
 

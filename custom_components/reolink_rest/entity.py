@@ -12,7 +12,7 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 from homeassistant.helpers import device_registry
-from homeassistant.helpers.entity import DeviceInfo, EntityDescription
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.util import dt
 
@@ -31,7 +31,14 @@ from async_reolink.api.errors import ReolinkResponseError, ErrorCodes
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD, DEFAULT_TIMEOUT
 from async_reolink.rest import Client as ReolinkClient
 from async_reolink.rest.connection import Encryption
-from async_reolink.rest.commands import ai, alarm, network, ptz, system
+from async_reolink.rest.commands import (
+    CommandResponseTypes,
+    ai,
+    alarm,
+    network,
+    ptz,
+    system,
+)
 
 
 from async_reolink.rest.errors import (
@@ -142,6 +149,7 @@ class _PTZ(PTZ):
         super().__init__()
 
         self._zf = None
+        self._zf_range = None
         self._pan = 0
         self._tilt = 0
         self._autofocus = False
@@ -162,8 +170,16 @@ class _PTZ(PTZ):
         return self._zf.zoom if self._zf is not None else 0
 
     @property
+    def zoom_range(self):
+        return self._zf_range.zoom if self._zf_range is not None else None
+
+    @property
     def focus(self):
         return self._zf.focus if self._zf is not None else 0
+
+    @property
+    def focus_range(self):
+        return self._zf_range.focus if self._zf_range is not None else None
 
     @property
     def autofocus(self):
@@ -191,6 +207,11 @@ class _PTZ(PTZ):
             raise TypeError("Invalid value")
         self._zf = value
 
+    def update_zf_range(self, value: ptz._ZoomFocusRange | None):
+        if value is not None and not isinstance(value, ptz._ZoomFocusRange):
+            raise TypeError("Invalid value")
+        self._zf_range = value
+
     def update_presets(self, value: Mapping[int, ptz.Preset]):
         """update presets"""
         if value is not None and not isinstance(value, Mapping[int, ptz.Preset]):
@@ -215,6 +236,7 @@ class ReolinkEntityData:
 
     def __init__(self, hass: HomeAssistant, config_entry: config_entries.ConfigEntry):
         self.hass = hass
+        self._init = True
         self.config_entry = config_entry
         self.client = ReolinkClient()
         self.device: device_registry.DeviceEntry = None
@@ -539,6 +561,7 @@ class ReolinkEntityData:
                 self.config_entry, options=options
             )
 
+        self._init = False
         return self
 
     def _create_motion_commands(
@@ -624,17 +647,25 @@ class ReolinkEntityData:
         elif channels is None or len(channels) == 0:
             channels = _get_channels(self.abilities, self.config_entry.options)
 
+        _r_type = (
+            CommandResponseTypes.DETAILED
+            if self._init
+            else CommandResponseTypes.VALUE_ONLY
+        )
+
         for i in channels:
             ability = abilities.channels[i]
             if ability.ptz.control in (PTZControl.ZOOM, PTZControl.ZOOM_FOCUS):
-                commands.append(ptz.GetZoomFocusRequest(i))
+                commands.append(ptz.GetZoomFocusRequest(i, _r_type))
             if ability.ptz.type == PTZType.AF:
                 command_channel[len(commands)] = i
                 commands.append(ptz.GetAutoFocusRequest(i))
+            if ability.ptz.preset:
+                commands.append(ptz.GetPresetRequest(i, _r_type))
             if ability.ptz.patrol:
-                commands.append(ptz.GetPatrolRequest(i))
+                commands.append(ptz.GetPatrolRequest(i, _r_type))
             if ability.ptz.tattern:
-                commands.append(ptz.GetTatternRequest(i))
+                commands.append(ptz.GetTatternRequest(i, _r_type))
         return (commands, command_channel)
 
     def _process_ptz_responses(
@@ -649,6 +680,9 @@ class ReolinkEntityData:
             channel = response.channel_id
             self.updated_ptz.add(channel)
             self.ptz[channel].update_zf(response.state)
+            if response.is_detailed:
+                self.ptz[channel].update_zf_range(response.state_range)
+
             return True
         if isinstance(response, ptz.GetPresetResponse):
             channel = response.channel_id

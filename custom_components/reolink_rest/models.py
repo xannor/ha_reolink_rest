@@ -8,6 +8,8 @@ from homeassistant.helpers.entity import EntityDescription
 
 from async_reolink.api import ai, ptz
 
+from async_reolink.rest.models import MinMaxRange
+
 
 @dataclass
 class ReolinkEntityDescription(EntityDescription):
@@ -49,8 +51,18 @@ class PTZ(ABC):
 
     @property
     @abstractmethod
+    def zoom_range(self) -> MinMaxRange[int] | None:
+        """zoom range"""
+
+    @property
+    @abstractmethod
     def focus(self) -> int:
         """focus"""
+
+    @property
+    @abstractmethod
+    def focus_range(self) -> MinMaxRange[int] | None:
+        """zoom range"""
 
     @property
     @abstractmethod
