@@ -214,13 +214,13 @@ class _PTZ(PTZ):
 
     def update_presets(self, value: Mapping[int, ptz.Preset]):
         """update presets"""
-        if value is not None and not isinstance(value, Mapping[int, ptz.Preset]):
+        if value is not None and not isinstance(value, Mapping):
             raise TypeError("Invalid value")
         self._presets = value
 
     def update_patrols(self, value: Mapping[int, ptz.Patrol]):
         """update presets"""
-        if value is not None and not isinstance(value, Mapping[int, ptz.Patrol]):
+        if value is not None and not isinstance(value, Mapping):
             raise TypeError("Invalid value")
         self._patrol = value
 
