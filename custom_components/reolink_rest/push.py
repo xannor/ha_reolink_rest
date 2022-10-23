@@ -32,7 +32,7 @@ from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
 from .const import DOMAIN, OPT_DISCOVERY
 
-from .typing import EntityData, ReolinkDomainData
+from .typing import EntityData, DomainData
 
 DATA_MANAGER: Final = "push_manager"
 DATA_STORE: Final = "push_store"
@@ -321,7 +321,7 @@ class PushManager:
         #    cleanup()
         #    self._storage.hass.create_task(self._subscribe(url, entry_id, save))
 
-        # domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        # domain_data: DomainData = self._storage.hass.data[DOMAIN]
         # entry_data = domain_data[entry_id]
         # coordinator = entry_data["coordinator"]
         # attempt resubscribe on next coordinator retrieval success
@@ -354,15 +354,13 @@ class PushManager:
 
         if sub is None or sub.expires is None:
             return
-        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        domain_data: DomainData = self._storage.hass.data[DOMAIN]
         entry_data = domain_data.get(entry_id, None)
         if entry_data is None:
             # entry was removed so we need to bail
             self._cancel_renew()
             return
-        expires = (
-            sub.timestamp + sub.expires + entry_data["coordinator"].data.time_difference
-        )
+        expires = sub.timestamp + sub.expires + entry_data.coordinator.data.time_diff
 
         if self._next_renewal is not None and expires > self._next_renewal:
             return
@@ -430,9 +428,9 @@ class PushManager:
         headers = {"action": message[0]}
 
         data = _create_envelope(message[2], wsse, *message[1])
-        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        domain_data: DomainData = self._storage.hass.data[DOMAIN]
         entry_data = domain_data[entry_id]
-        entity_data = entry_data["coordinator"].data
+        entity_data = entry_data.coordinator.data
         service_url = self._get_service_url(config_entry, entity_data)
         response = None
         if service_url is not None:
@@ -473,9 +471,9 @@ class PushManager:
         if sub is None:
             return
 
-        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        domain_data: DomainData = self._storage.hass.data[DOMAIN]
         entry_data = domain_data[entry_id]
-        coordinator = entry_data["coordinator"]
+        coordinator = entry_data.coordinator
         manager_url = self._get_onvif_base(coordinator.config_entry, coordinator.data)
         if manager_url is None:
             return None
@@ -530,9 +528,9 @@ class PushManager:
         if sub is None:
             return
 
-        domain_data: ReolinkDomainData = self._storage.hass.data[DOMAIN]
+        domain_data: DomainData = self._storage.hass.data[DOMAIN]
         entry_data = domain_data[entry_id]
-        coordinator = entry_data["coordinator"]
+        coordinator = entry_data.coordinator
 
         send = True
         if sub.expires:

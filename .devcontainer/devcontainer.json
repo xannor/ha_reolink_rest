@@ -1,68 +1,50 @@
+// See https://aka.ms/vscode-remote/devcontainer.json for format details.
 {
-  "name": "Home Assistant Dev",
-  "context": "..",
-  "dockerFile": "Dockerfile",
-  "build": {
-    "args": {
-      "VARIANT": "0-3.10"
-    }
-  },
-  "initializeCommand": "./.devcontainer/initializeCommand.sh",
-  "postCreateCommand": "./.devcontainer/postCreateCommand.sh",
-  "postStartCommand": "/usr/src/core/script/bootstrap",
-  "containerEnv": {
-    "DEVCONTAINER": "1"
-  },
-  "remoteEnv": {
-    "INTERNAL_URL": "http://${containerEnv:DOCKER_HOST_IP}:8123"
-  },
-  "appPort": [
-    "8123:8123",
-    "3000:3000/udp"
-  ],
-  "runArgs": [
-    "--env-file",
-    ".devcontainer/devcontainer.env",
-    "-e",
-    "GIT_EDITOR=code --wait"
-  ],
-  "mounts": [
-    "source=${localWorkspaceFolder}/../reolink_discovery,target=${containerWorkspaceFolder}/../reolink_discovery,type=bind,consistency=cached",
-    "source=${localWorkspaceFolder}/../../api,target=${containerWorkspaceFolder}/../api,type=bind,consistency=cached"
-  ],
-  "extensions": [
-    "ms-python.vscode-pylance",
-    "visualstudioexptteam.vscodeintellicode",
-    "redhat.vscode-yaml",
-    "esbenp.prettier-vscode",
-    "GitHub.vscode-pull-request-github"
-  ],
-  // Please keep this file in sync with settings in home-assistant/.vscode/settings.default.json
-  "settings": {
-    "python.pythonPath": "/usr/local/bin/python",
-    "python.linting.pylintEnabled": true,
-    "python.linting.enabled": true,
-    "python.formatting.provider": "black",
-    "python.testing.pytestArgs": [
-      "--no-cov"
+    "image": "ghcr.io/ludeeus/devcontainer/integration:stable",
+    "name": "ReoLink REST integration development",
+    "context": "..",
+    "appPort": [
+        "9123:8123",
+        "3000:3000/udp"
     ],
-    "editor.formatOnPaste": false,
-    "editor.formatOnSave": true,
-    "editor.formatOnType": true,
-    "files.trimTrailingWhitespace": true,
-    "terminal.integrated.profiles.linux": {
-      "zsh": {
-        "path": "/usr/bin/zsh"
-      }
+    "portsAttributes": {
+        "8123": {
+            "label": "Home Assistant",
+            "onAutoForward": "notify"
+        },
+        "5678": {
+            "label": "Python Debug",
+            "onAutoForward": "ignore"
+        },
+        "3000": {
+            "label": "ReoLink Discovery",
+            "onAutoForward": "silent"
+        }
     },
-    "terminal.integrated.defaultProfile.linux": "zsh",
-    "yaml.customTags": [
-      "!input scalar",
-      "!secret scalar",
-      "!include_dir_named scalar",
-      "!include_dir_list scalar",
-      "!include_dir_merge_list scalar",
-      "!include_dir_merge_named scalar"
-    ]
-  }
+    "forwardPorts": [],
+    "mounts": [
+        "source=${localWorkspaceFolder}/../reolink_discovery,target=${containerWorkspaceFolder}/.libs/reolink_discovery,type=bind,consistency=cached",
+        "source=${localWorkspaceFolder}/../../api,target=${containerWorkspaceFolder}/.libs/api,type=bind,consistency=cached"
+    ],
+    "postCreateCommand": "./.devcontainer/postCreateCommand.sh",
+    "extensions": [
+        "ms-python.python",
+        "github.vscode-pull-request-github",
+        "ryanluker.vscode-coverage-gutters",
+        "ms-python.vscode-pylance"
+    ],
+    "settings": {
+        "files.eol": "\n",
+        "editor.tabSize": 4,
+        "terminal.integrated.shell.linux": "/bin/bash",
+        "python.pythonPath": "/usr/bin/python3",
+        "python.analysis.autoSearchPaths": false,
+        "python.linting.pylintEnabled": true,
+        "python.linting.enabled": true,
+        "python.formatting.provider": "black",
+        "editor.formatOnPaste": false,
+        "editor.formatOnSave": true,
+        "editor.formatOnType": true,
+        "files.trimTrailingWhitespace": true
+    }
 }

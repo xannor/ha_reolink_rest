@@ -1,5 +1,9 @@
 {
     "recommendations": [
-        "ms-python.black-formatter"
+        "ms-python.black-formatter",
+        "ms-python.vscode-pylance",
+        "redhat.vscode-yaml",
+        "esbenp.prettier-vscode",
+        "GitHub.vscode-pull-request-github"
     ]
 }

@@ -2,10 +2,12 @@
 import json
 import os
 from pathlib import Path
+import sys
 from typing import cast
 
 import homeassistant
 
+sys.path.insert(0, "../.scripts/ha_helpers")
 from script.translations import develop
 from script.translations.upload import FILENAME_FORMAT
 

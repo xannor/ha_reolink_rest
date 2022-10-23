@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import ssl
 from typing import Mapping, TypeVar
 from urllib.parse import urlparse
 
@@ -13,6 +14,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import DiscoveryInfoType
 
 from homeassistant.const import (
+    CONF_SCAN_INTERVAL,
     CONF_HOST,
     CONF_PORT,
     CONF_USERNAME,
@@ -22,18 +24,26 @@ from homeassistant.const import (
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
 from async_reolink.api import errors as reo_errors
-from async_reolink.api.network.typings import ChannelStatus
-from async_reolink.rest import Client as RestClient
-from async_reolink.rest.connection import Encryption
+from async_reolink.api.network.typing import ChannelStatus
+from async_reolink.rest.client import Client as RestClient
+from async_reolink.rest.connection.typing import Encryption
 from async_reolink.rest.errors import AUTH_ERRORCODES
 
+from .typing import DomainData
+
+from .entity import weak_ssl_context
+
 from .const import (
+    DEFAULT_HISPEED_INTERVAL,
     DEFAULT_PREFIX_CHANNEL,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     CONF_USE_HTTPS,
+    OPT_HISPEED_INTERVAL,
     OPT_PREFIX_CHANNEL,
     OPT_CHANNELS,
     OPT_DISCOVERY,
+    OPT_WEAK_SSL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,7 +63,8 @@ def _connection_schema(**defaults: UserDataType):
     return {
         vol.Required(CONF_HOST, default=defaults.get(CONF_HOST, vol.UNDEFINED)): str,
         vol.Optional(
-            CONF_PORT, default=defaults.get(CONF_HOST, vol.UNDEFINED)
+            CONF_PORT,
+            description={"suggested_value": defaults.get(CONF_PORT, None)},
         ): cv.port,
         vol.Optional(
             CONF_USE_HTTPS, default=defaults.get(CONF_USE_HTTPS, vol.UNDEFINED)
@@ -107,9 +118,7 @@ def _auth_schema(require_password: bool = False, **defaults: UserDataType):
     return {
         vol.Required(
             CONF_USERNAME,
-            description={
-                "suggested_value": defaults.get(CONF_USERNAME, DEFAULT_USERNAME)
-            },
+            default=defaults.get(CONF_USERNAME, DEFAULT_USERNAME),
         ): str,
         passwd: str,
     }
@@ -185,7 +194,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not _validate_connection_data(data):
             return await self.async_step_connection(data)
 
-        client = RestClient()
+        if self.options is not None and self.options.get(OPT_WEAK_SSL, False):
+            weak_ssl = weak_ssl_context
+        else:
+            weak_ssl = None
+        client = RestClient(ssl=weak_ssl)
         encryption = (
             Encryption.HTTPS if data.get(CONF_USE_HTTPS, False) else Encryption.NONE
         )
@@ -196,7 +209,8 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 encryption=encryption,
             )
         except Exception:  # pylint: disable=broad-except
-            return await self.async_step_connection(data, {"base": "unknown exception"})
+            _LOGGER.exception("Unhandled exception occurred")
+            return await self.async_step_connection(data, {"base": "unknown"})
 
         connection_id = client.connection_id
         title = (self.init_data or {}).get("name", "Camera")
@@ -230,17 +244,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data[CONF_HOST],
                     )
 
-            abilities = await client.get_ability(
+            capabilities = await client.get_capabilities(
                 data.get(CONF_USERNAME, DEFAULT_USERNAME)
             )
 
-            if abilities.device.info:
+            if capabilities.device.info:
                 devinfo = await client.get_device_info()
                 title: str = devinfo.name or title
                 if self.unique_id is None:
-                    if abilities.p2p:
+                    if capabilities.p2p:
                         p2p = await client.get_p2p()
-                    if abilities.local_link:
+                    if capabilities.local_link:
                         link = await client.get_local_link()
                     unique_id = _create_unique_id(
                         uuid=p2p.uid if p2p is not None else None,
@@ -279,9 +293,25 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data[CONF_HOST],
             )
             return self.async_abort(reason="device_error")
+        except ssl.SSLError as ssl_error:
+            if (
+                ssl_error.errno
+                == 1
+                # and ssl_error.reason == "SSLV3_ALERT_HANDSHAKE_FAILURE"
+            ):
+                _LOGGER.warning(
+                    "Device %s only supports weak (deprecated) SSL, enabling weak support for this device. If SSL is not necessary, please consider disabling SSL on device, otherwise I STRONGLY advise upgrading the device firmware or replacing the device.",
+                    data[CONF_HOST],
+                )
+                if self.options is None:
+                    self.options = {}
+                self.options[OPT_WEAK_SSL] = True
+                return await self.async_step_user(user_input)
+            _LOGGER.exception("SSL error occurred")
+            return await self.async_step_connection(data, {"base": "unknown"})
         except Exception:  # pylint: disable=broad-except
             # we want to "cleanly" fail as possible
-            _LOGGER.exception("Unhanled exception occurred")
+            _LOGGER.exception("Unhandled exception occurred")
             return await self.async_step_connection(data, {"base": "unknown"})
         finally:
             await client.disconnect()
@@ -407,8 +437,7 @@ class OptionsFlow(config_entries.OptionsFlow):
     def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         super().__init__()
         self.config_entry = config_entry
-        self.data: UserDataType = config_entry.data.copy()
-        self.options: UserDataType = config_entry.options.copy()
+        self.data: UserDataType = config_entry.options.copy()
 
     async def async_step_init(
         self,
@@ -416,9 +445,88 @@ class OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Options form"""
 
-        return self.async_show_menu(step_id="init", menu_options=["channels"])
+        menu = ["options"]
+
+        domain: DomainData = self.hass.data[DOMAIN]
+        entry_data = domain[self.config_entry.entry_id]
+        if len(entry_data.coordinator.data.capabilities.channels) > 1:
+            menu.append("channels")
+
+        if len(menu) == 1:
+            method = f"async_step_{menu[0]}"
+            return await getattr(self, method)(user_input)
+
+        return self.async_show_menu(step_id=self.cur_step, menu_options=menu)
+
+    async def async_step_options(
+        self,
+        user_input: UserDataType | None = None,
+        errors: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """Options"""
+
+        if user_input is None:
+            user_input = self.data
+
+        schema = {
+            vol.Optional(
+                CONF_SCAN_INTERVAL,
+                description={
+                    "suggested_value": user_input.get(
+                        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+                    )
+                },
+            ): int,
+            vol.Optional(
+                OPT_HISPEED_INTERVAL,
+                description={
+                    "suggested_value": user_input.get(
+                        OPT_HISPEED_INTERVAL, DEFAULT_HISPEED_INTERVAL
+                    )
+                },
+            ): int,
+        }
+
+        if self.config_entry.data.get(CONF_USE_HTTPS, False):
+            schema[
+                vol.Required(
+                    OPT_WEAK_SSL,
+                    description={
+                        "suggested_value": user_input.get(OPT_WEAK_SSL, False)
+                    },
+                )
+            ] = bool
+
+        return self.async_show_form(
+            step_id="options",
+            data_schema=vol.Schema(schema),
+        )
+
+    async def async_step_channels(
+        self,
+        user_input: UserDataType | None = None,
+        errors: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """Channels"""
+
+        if user_input is None:
+            user_input = self.data
+
+        domain: DomainData = self.hass.data[DOMAIN]
+        entry_data = domain[self.config_entry.entry_id]
+
+        schema = _channels_schema(
+            _simple_channels(entry_data.channel_statuses), **user_input
+        )
+
+        return self.async_show_form(
+            step_id="channels",
+            data_schema=vol.Schema(schema),
+            errors=errors,
+            description_placeholders={},
+        )
 
     async def async_step_commit(self) -> FlowResult:
         """Save Changes"""
 
-        return self.async_create_entry(title="", data=self.options)
+        return self.async_create_entry(title="", data=self.data)

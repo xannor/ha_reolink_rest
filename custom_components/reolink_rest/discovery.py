@@ -1,6 +1,8 @@
 """Reolink Discovery support"""
 
 import logging
+from typing import TypedDict
+from typing_extensions import NotRequired
 from homeassistant.core import HomeAssistant
 from homeassistant.loader import bind_hass
 from homeassistant.config_entries import SOURCE_INTEGRATION_DISCOVERY
@@ -12,6 +14,15 @@ from homeassistant.helpers.discovery_flow import async_create_flow
 from .const import DISCOVERY_EVENT, DOMAIN, OPT_DISCOVERY
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class DiscoveryDict(TypedDict):
+    """Discovery Data"""
+
+    uuid: NotRequired[str]
+    mac: NotRequired[str]
+    ip: NotRequired[str]
+    name: NotRequired[str]
 
 
 @bind_hass

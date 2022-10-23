@@ -1,56 +1,97 @@
 """Common Typings"""
 
 from datetime import timedelta
-from typing import Mapping, Protocol, TypedDict
+from typing import (
+    Mapping,
+    MutableMapping,
+    Protocol,
+    Sequence,
+)
 
 from aiohttp.web import Request, Response
 
 from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.helpers.device_registry import DeviceEntry
-from async_reolink.api.ai import typings as ai
-from async_reolink.api.network import typings as network
-from async_reolink.api.system import typings as system
+
+from async_reolink.api.connection import typing as commands
+
+from async_reolink.api.network import typing as network
 from async_reolink.api.system.capabilities import Capabilities
 
 
-from async_reolink.rest import Client
+from async_reolink.rest.client import Client
 
-from .models import Motion, PTZ
+# class _EntityData(Protocol):
+#     """Entity Data and API"""
+
+#     client: Client
+#     device: DeviceEntry
+#     time_difference: timedelta
+#     abilities: Capabilities
+#     device_info: system.DeviceInfo
+#     channels: Mapping[int, DeviceInfo]
+#     ports: network.NetworkPorts
+#     updated_motion: frozenset[int]
+#     ai: ai.Config
+#     motion: Mapping[int, Motion]
+#     updated_ptz: frozenset[int]
+#     ptz: Mapping[int, PTZ]
+
+#     def async_request_motion_update(self, channel: int = 0) -> None:
+#         """Request motion update for channel"""
+
+#     def async_request_ptz_update(self, channel: int = 0) -> None:
+#         """Request PTZ update for channel"""
+
+
+class ChannelData(Protocol):
+    """Common Entity Channel Data"""
+
+    device: DeviceInfo
+    offline: bool
+
+
+CANCEL_CALLBACK = CALLBACK_TYPE
+
+
+class RequestQueue(Protocol):
+    """Request Queue"""
+
+    @property
+    def responses(self) -> Sequence[commands.CommandResponse]:
+        """current queue responses"""
+        ...
+
+    def append(self, request: commands.CommandRequest) -> CANCEL_CALLBACK:
+        """Add request to queue, returns callback to remove pending request"""
+        ...
+
+    def index(self, request: commands.CommandRequest) -> int:
+        """Return the index of the command in the queue or -1 for not found"""
+        ...
 
 
 class EntityData(Protocol):
-    """Entity Data and API"""
+    """Common Entity Data"""
+
+    device: DeviceInfo
+    capabilities: Capabilities
+    ports: network.NetworkPorts
+    channels: Mapping[int, ChannelData]
+    time_diff: timedelta
+
+
+class EntryData(Protocol):
+    """Common Entry Data"""
 
     client: Client
-    device: DeviceEntry
-    time_difference: timedelta
-    abilities: Capabilities
-    device_info: system.DeviceInfo
-    channels: Mapping[int, DeviceInfo]
-    ports: network.NetworkPorts
-    updated_motion: frozenset[int]
-    ai: ai.Config
-    motion: Mapping[int, Motion]
-    updated_ptz: frozenset[int]
-    ptz: Mapping[int, PTZ]
-
-    def async_request_motion_update(self, channel: int = 0) -> None:
-        """Request motion update for channel"""
-
-    def async_request_ptz_update(self, channel: int = 0) -> None:
-        """Request PTZ update for channel"""
-
-
-class ReolinkEntryData(TypedDict, total=False):
-    """Common entry data"""
-
     coordinator: DataUpdateCoordinator[EntityData]
-    motion_coordinators: dict[int, DataUpdateCoordinator[EntityData]]
+    hispeed_coordinator: DataUpdateCoordinator
 
 
-ReolinkDomainData = dict[str, ReolinkEntryData]
+EntryKey = str
+DomainData = MutableMapping[EntryKey, EntryData]
 
 
 class AsyncWebhookHandler(Protocol):

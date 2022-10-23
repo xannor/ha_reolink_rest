@@ -56,7 +56,8 @@
         "description": "General Device Options",
         "data": {
           "scan_interval": "Polling Interval",
-          "motion_interval": "Polling Motion Interval"
+          "hispeed_interval": "Hi-Speed Polling Interval",
+          "weak_ssl": "Use weak (insecure) SSL options"
         }
       },
       "channels": {

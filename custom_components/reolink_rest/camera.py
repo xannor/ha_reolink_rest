@@ -24,25 +24,25 @@ from homeassistant.components.camera import (
 
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
+from async_reolink.api.system import capabilities
+
 from async_reolink.api.errors import ReolinkResponseError
 
-from async_reolink.api.typings import StreamTypes
+from async_reolink.api.typing import StreamTypes
 
 from async_reolink.api.const import (
     DEFAULT_USERNAME,
     DEFAULT_PASSWORD,
 )
 
-from async_reolink.api.system import capabilities
-
 from .entity import (
     ReolinkEntityDataUpdateCoordinator,
     ReolinkEntity,
 )
 
-from .typing import ReolinkDomainData
+from .typing import DomainData
 
-from .const import DATA_COORDINATOR, DOMAIN
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,39 +147,38 @@ async def async_setup_entry(
     """Setup camera entities"""
 
     _LOGGER.debug("Setting up camera")
-    domain_data: ReolinkDomainData = hass.data[DOMAIN]
+    domain_data: DomainData = hass.data[DOMAIN]
     entry_data = domain_data[config_entry.entry_id]
-    _entry_data: dict = entry_data
 
-    coordinator = entry_data[DATA_COORDINATOR]
+    coordinator = entry_data.coordinator
 
-    stream = "stream" in hass.config.components
+    can_stream = "stream" in hass.config.components
 
     entities: list[ReolinkCamera] = []
     data = coordinator.data
-    _abilities = data.abilities
+    _capabilities = data.capabilities
     for channel in data.channels.keys():
-        ability = _abilities.channels[channel]
+        channel_capabilities = _capabilities.channels[channel]
 
         features: int = 0
 
         otypes: list[OutputStreamTypes] = []
-        if ability.snap:
+        if channel_capabilities.snap:
             otypes.append(OutputStreamTypes.JPEG)
-        if stream:
-            if _abilities.rtmp:
+        if can_stream:
+            if _capabilities.rtmp:
                 otypes.append(OutputStreamTypes.RTMP)
-            if _abilities.rtsp:
+            if _capabilities.rtsp:
                 otypes.append(OutputStreamTypes.RTSP)
 
         stypes: list[StreamTypes] = []
-        if ability.live in (
+        if channel_capabilities.live in (
             capabilities.Live.MAIN_EXTERN_SUB,
             capabilities.Live.MAIN_SUB,
         ):
             stypes.append(StreamTypes.MAIN)
             stypes.append(StreamTypes.SUB)
-        if ability.live == capabilities.Live.MAIN_EXTERN_SUB:
+        if channel_capabilities.live == capabilities.Live.MAIN_EXTERN_SUB:
             stypes.append(StreamTypes.EXT)
 
         if not otypes or not stypes:
@@ -192,7 +191,8 @@ async def async_setup_entry(
                 if (
                     description.output_type == OutputStreamTypes.RTMP
                     and description.stream_type == StreamTypes.MAIN
-                    and ability.main_encoding == capabilities.EncodingType.H265
+                    and channel_capabilities.main_encoding
+                    == capabilities.EncodingType.H265
                 ):
                     coordinator.logger.warning(
                         "Channel (%s) is H265 so skipping (%s) (%s) as it is not supported",
@@ -239,7 +239,7 @@ async def async_setup_entry(
                     coordinator.logger.warning(
                         "(%s) is disabled on device (%s) so (%s) stream will be disabled",
                         description.output_type.name,
-                        coordinator.data.device.name,
+                        coordinator.data.device["name"],
                         description.stream_type.name,
                     )
 
@@ -277,10 +277,8 @@ class ReolinkCamera(ReolinkEntity, Camera):
         self._port_disabled_warn = False
 
     async def stream_source(self) -> str | None:
-        domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
-        client = domain_data[self.coordinator.config_entry.entry_id][
-            DATA_COORDINATOR
-        ].data.client
+        domain_data: DomainData = self.hass.data[DOMAIN]
+        client = domain_data[self.coordinator.config_entry.entry_id].client
 
         if self.entity_description.output_type == OutputStreamTypes.RTSP:
             try:
@@ -310,23 +308,27 @@ class ReolinkCamera(ReolinkEntity, Camera):
             return await super().stream_source()
         return url
 
-    async def _async_use_rtsp_to_webrtc(self) -> bool:
-        # Force falce since the RTMP stream does not seem to work with webrtc
-        if self.entity_description.output_type != OutputStreamTypes.RTSP:
-            return False
-        return await super()._async_use_rtsp_to_webrtc()
+    # async def async_enable_motion_detection(self) -> None:
+    #     domain_data: DomainData = self.hass.data[DOMAIN]
+    #     client = domain_data[self.coordinator.config_entry.entry_id].client
+
+    #     return await super().async_enable_motion_detection()
+
+    # async def async_disable_motion_detection(self) -> None:
+    #     domain_data: DomainData = self.hass.data[DOMAIN]
+    #     client = domain_data[self.coordinator.config_entry.entry_id].client
+
+    #     return await super().async_disable_motion_detection()
 
     async def _async_use_rtsp_to_webrtc(self) -> bool:
-        # Force falce since the RTMP stream does not seem to work with webrtc
+        # Force false since the RTMP stream does not seem to work with webrtc
         if self.entity_description.output_type != OutputStreamTypes.RTSP:
             return False
         return await super()._async_use_rtsp_to_webrtc()
 
     async def _async_camera_image(self):
-        domain_data: ReolinkDomainData = self.hass.data[DOMAIN]
-        client = domain_data[self.coordinator.config_entry.entry_id][
-            DATA_COORDINATOR
-        ].data.client
+        domain_data: DomainData = self.hass.data[DOMAIN]
+        client = domain_data[self.coordinator.config_entry.entry_id].client
         try:
             image = await client.get_snap(self._channel_id)
         except ReolinkResponseError as resperr:
