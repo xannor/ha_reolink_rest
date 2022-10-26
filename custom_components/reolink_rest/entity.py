@@ -5,6 +5,7 @@ from time import time
 from types import SimpleNamespace
 
 from typing import TYPE_CHECKING, Mapping, Protocol, cast
+import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant import config_entries
 from homeassistant.helpers.update_coordinator import (
@@ -13,6 +14,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.helpers import device_registry
 from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.util.dt import utcnow, as_utc
 
@@ -64,7 +66,8 @@ from .const import (
     OPT_CHANNELS,
     OPT_DISCOVERY,
     OPT_PREFIX_CHANNEL,
-    OPT_WEAK_SSL,
+    OPT_SSL,
+    SSLMode,
 )
 
 
@@ -80,29 +83,40 @@ class EntityData(BaseEntityData, RequestQueue, Protocol):
     channel_statuses: Mapping[int, ChannelStatus]
 
 
-def _dev_to_info(device: device_registry.DeviceEntry):
-    return DeviceInfo(
-        configuration_url=device.configuration_url,
-        connections=device.connections,
-        entry_type=device.entry_type,
-        hw_version=device.hw_version,
-        identifiers=device.identifiers,
-        manufacturer=device.manufacturer,
-        model=device.model,
-        name=device.name,
-        suggested_area=device.suggested_area,
-        via_device=device.via_device_id,
-        sw_version=device.sw_version,
-    )
-
-
 def weak_ssl_context(__base_url: str):
-    """Create a weak ssl context to work with outdated hardware"""
+    """Create a weak ssl context to work with self signed certs"""
+    return False
+
+
+def insecure_ssl_context(__base_url: str):
+    """Create an insecure ssl context to work with outdated hardware"""
     ctx = ssl.create_default_context()
     ctx.set_ciphers("DEFAULT")
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+def _create_device_info(
+    device: device_registry.DeviceEntry, registry: device_registry.DeviceRegistry
+):
+    if device.via_device_id is not None:
+        via_device = registry.async_get(device.via_device_id).identifiers
+    else:
+        via_device = None
+    return DeviceInfo(
+        configuration_url=device.configuration_url,
+        connections=device.connections,
+        manufacturer=device.manufacturer,
+        entry_type=device.entry_type,
+        hw_version=device.hw_version,
+        identifiers=device.identifiers,
+        model=device.model,
+        name=device.name,
+        suggested_area=device.suggested_area,
+        sw_version=device.sw_version,
+        via_device=via_device,
+    )
 
 
 def _create_coordiator_data(**kwargs):
@@ -138,7 +152,7 @@ def create_low_frequency_data_update(
         authentication_id=0,
         capabilities=None,
         channel_statuses=None,
-        channels={0: SimpleNamespace(device=None, offline=True)},
+        channels={},
         connection_id=0,
         device=None,
         device_info=None,
@@ -156,21 +170,27 @@ def create_low_frequency_data_update(
     domain_data: DomainData = hass.data[DOMAIN]
     entry_data = domain_data[entry.entry_id]
 
-    if entry.options.get(OPT_WEAK_SSL, False):
-        weak_ssl = weak_ssl_context
+    ssl_mode = SSLMode(entry.options.get(OPT_SSL, SSLMode.NORMAL))
+    if ssl_mode == SSLMode.WEAK:
+        ssl_mode = weak_ssl_context
+    elif ssl_mode == SSLMode.INSECURE:
+        ssl_mode = insecure_ssl_context
     else:
-        weak_ssl = None
+        ssl_mode = None
 
     client = entry_data.client
     if client is None:
-        client = ReolinkClient(ssl=weak_ssl)
+        client = ReolinkClient(ssl=ssl_mode)
         entry_data.client = client
 
     discovery: DiscoveryDict = entry.options.get(OPT_DISCOVERY, None)
 
-    def entry_update(_hass: HomeAssistant, entry: config_entries.ConfigEntry):
-        nonlocal discovery
+    def entry_update(hass: HomeAssistant, entry: config_entries.ConfigEntry):
+        nonlocal discovery, ssl_mode
+        ssl_mode = SSLMode(entry.options.get(OPT_SSL, SSLMode.NORMAL))
         discovery = entry.options.get(OPT_DISCOVERY, None)
+        if entry_data.coordinator.last_exception is not None:
+            hass.create_task(entry_data.coordinator.async_request_refresh())
 
     entry.add_update_listener(entry_update)
 
@@ -213,10 +233,97 @@ def create_low_frequency_data_update(
                     data.authentication_id = 0
                     await client.disconnect()
                     raise ConfigEntryAuthFailed()
+            except aiohttp.ClientResponseError as http_error:
+                if (
+                    http_error.status in (301, 302, 308)
+                    and "location" in http_error.headers
+                ):
+                    location = http_error.headers["location"]
+                    # TODO : verify redirect stays on device
+                    if client.secured and location.startswith("http://"):
+                        async_create_issue(
+                            hass,
+                            DOMAIN,
+                            "from_ssl_redirect",
+                            severity=IssueSeverity.ERROR,
+                            is_fixable=True,
+                            data={"entry_id": entry.entry_id},
+                            translation_key="from_ssl_redirect",
+                            translation_placeholders={
+                                "name": device.name
+                                if device is not None
+                                else client.hostname,
+                            },
+                        )
+                    elif not client.secured and location.startswith("https://"):
+                        async_create_issue(
+                            hass,
+                            DOMAIN,
+                            "to_ssl_redirect",
+                            severity=IssueSeverity.ERROR,
+                            is_fixable=True,
+                            data={"entry_id": entry.entry_id},
+                            translation_key="from_ssl_redirect",
+                            translation_placeholders={
+                                "name": device.name
+                                if device is not None
+                                else client.hostname,
+                            },
+                        )
+                elif http_error.status == 500:
+                    if client.secured:
+                        # this error occurs when HTTPS is disabled on the camera but we try to connect to it.
+                        async_create_issue(
+                            hass,
+                            DOMAIN,
+                            "from_ssl_redirect",
+                            severity=IssueSeverity.ERROR,
+                            is_fixable=True,
+                            data={"entry_id": entry.entry_id},
+                            translation_key="from_ssl_redirect",
+                            translation_placeholders={
+                                "name": device.name
+                                if device is not None
+                                else client.hostname,
+                            },
+                        )
+                    else:
+                        async_create_issue(
+                            hass,
+                            DOMAIN,
+                            "http_error",
+                            severity=IssueSeverity.CRITICAL,
+                            is_fixable=True,
+                            data={"entry_id": entry.entry_id},
+                            translation_key="http_error",
+                            translation_placeholders={
+                                "name": device.name
+                                if device is not None
+                                else client.hostname,
+                            },
+                        )
+                raise http_error
+            except ssl.SSLError as ssl_error:
+                if ssl_error.errno == 1:
+                    async_create_issue(
+                        hass,
+                        DOMAIN,
+                        "insecure_ssl",
+                        severity=IssueSeverity.ERROR,
+                        is_fixable=True,
+                        data={"entry_id": entry.entry_id},
+                        translation_key="insecure_ssl",
+                        translation_placeholders={
+                            "name": device.name
+                            if device is not None
+                            else client.hostname,
+                        },
+                    )
+                raise ssl_error
             except ReolinkResponseError as reoresp:
                 if reoresp.code in AUTH_ERRORCODES:
                     await client.disconnect()
-                    raise ConfigEntryAuthFailed()
+                    raise ConfigEntryAuthFailed() from reoresp
                 raise reoresp
             data.authentication_id = client.authentication_id
 
@@ -265,7 +372,6 @@ def create_low_frequency_data_update(
 
             if dev_info.channels > 1:
                 queue.append(commands.create_get_channel_status_request())
-        channels: dict[int, ChannelData] = data.channels
         channel_stats: UpdatableChannelStatuses = data.channel_statuses
 
         if data.ports is None:
@@ -329,10 +435,7 @@ def create_low_frequency_data_update(
                 default_model=dev_info.model,
                 configuration_url=client.base_url,
             )
-            data.device = _dev_to_info(device)
-            if dev_info.channels < 2:
-                data.channels[0].device = data.device
-                data.channels[0].offline = False
+            data.device = _create_device_info(device, registry)
         else:
             registry = device_registry.async_get(hass)
             updated_device = registry.async_update_device(
@@ -343,28 +446,56 @@ def create_low_frequency_data_update(
             )
             if updated_device and updated_device != device:
                 device = updated_device
-                data.device = _dev_to_info(updated_device)
-                if dev_info.channels < 2:
-                    data.channels[0].device = data.device
+                if data.device is None:
+                    data.device = _create_device_info(
+                        updated_device, registry, registry
+                    )
+                else:
+                    data.device.update(_create_device_info(updated_device, registry))
 
-        if updated_chan_stats:
-            for i in entry.options.get(OPT_CHANNELS, list(range(dev_info.channels))):
-                status = channel_stats.get(i, None)
-                if status is None:
-                    continue
-                # TODO : status.online?
-
-                name = status.name or f"Channel {status.channel_id}"
-                if entry.options.get(OPT_PREFIX_CHANNEL, False):
-                    name = f"{device.name} {name}"
-                channel_data = channels.get(status.channel_id, None)
+        wanted_channels: list[int] = entry.options.get(OPT_CHANNELS, None)
+        if wanted_channels is not None and len(wanted_channels) == 0:
+            wanted_channels = None
+        if updated_chan_stats or (dev_info.channels == 1 and len(data.channels) == 0):
+            for channel in range(dev_info.channels):
+                wanted = (
+                    channel in wanted_channels if wanted_channels is not None else True
+                )
+                channel_data = data.channels.get(channel, None)
                 if channel_data is None:
                     channel_data: ChannelData = SimpleNamespace(
                         device=None, offline=True
                     )
-                    channels[status.channel_id] = channel_data
-                channel_data.offline = not status.online
+                    data.channels[channel] = channel_data
+                status = (
+                    channel_stats.get(channel, None)
+                    if channel_stats is not None
+                    else None
+                )
+                if status is None:
+                    if channel == 0:
+                        channel_data.offline = False
+                        channel_data.device = data.device
+                        continue
+                    entry_data.coordinator.logger.warning(
+                        "Device %s did not give a status for channel %s, this could be potential problem",
+                        device.name,
+                        channel,
+                    )
+                    channel_data.offline = True
+                    continue
+                channel_data.offline = status.online
                 channel_device = channel_devices.get(status.channel_id, None)
+                name = status.name or f"Channel {status.channel_id}"
+                if entry.options.get(OPT_PREFIX_CHANNEL, False):
+                    name = f"{device.name} {name}"
+                disabled_by = None
+                if channel_device is not None and channel_device.disabled:
+                    disabled_by = channel_device.disabled_by
+                elif not wanted:
+                    disabled_by = device_registry.DeviceEntryDisabler.CONFIG_ENTRY
+                elif not status.online:
+                    disabled_by = device_registry.DeviceEntryDisabler.INTEGRATION
                 if channel_device is None:
                     if not registry:
                         registry = device_registry.async_get(hass)
@@ -375,18 +506,26 @@ def create_low_frequency_data_update(
                         default_name=name,
                         identifiers={(DOMAIN, f"{device.id}-{status.channel_id}")},
                         default_manufacturer=device.manufacturer,
+                        disabled_by=disabled_by,
                     )
                     channel_devices[status.channel_id] = channel_device
-                    channel_data.device = _dev_to_info(channel_device)
+                    channel_data.device = _create_device_info(channel_device, registry)
                 else:
                     if not registry:
                         registry = device_registry.async_get(hass)
                     updated_device = registry.async_update_device(
-                        channel_device.id, name=name
+                        channel_device.id, name=name, disabled_by=disabled_by
                     )
                     if updated_device and updated_device != channel_device:
                         channel_devices[status.channel_id] = updated_device
-                        channel_data.device = _dev_to_info(updated_device)
+                        if channel_data.device is None:
+                            channel_data.device = _create_device_info(
+                                updated_device, registry
+                            )
+                        else:
+                            channel_data.device.update(
+                                _create_device_info(updated_device, registry)
+                            )
 
         if (uuid or mac) and OPT_DISCOVERY not in entry.options:
             options = entry.options.copy()

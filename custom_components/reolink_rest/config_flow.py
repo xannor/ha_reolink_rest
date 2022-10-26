@@ -5,6 +5,7 @@ import logging
 import ssl
 from typing import Mapping, TypeVar
 from urllib.parse import urlparse
+import aiohttp
 
 import voluptuous as vol
 
@@ -31,7 +32,7 @@ from async_reolink.rest.errors import AUTH_ERRORCODES
 
 from .typing import DomainData
 
-from .entity import weak_ssl_context
+from .entity import insecure_ssl_context, weak_ssl_context
 
 from .const import (
     DEFAULT_HISPEED_INTERVAL,
@@ -43,7 +44,8 @@ from .const import (
     OPT_PREFIX_CHANNEL,
     OPT_CHANNELS,
     OPT_DISCOVERY,
-    OPT_WEAK_SSL,
+    OPT_SSL,
+    SSLMode,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -194,11 +196,18 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not _validate_connection_data(data):
             return await self.async_step_connection(data)
 
-        if self.options is not None and self.options.get(OPT_WEAK_SSL, False):
-            weak_ssl = weak_ssl_context
+        ssl_mode = (
+            SSLMode(self.options.get(OPT_SSL, SSLMode.NORMAL))
+            if self.options is not None
+            else SSLMode.NORMAL
+        )
+        if ssl_mode == SSLMode.INSECURE:
+            ssl_mode = insecure_ssl_context
+        elif ssl_mode == SSLMode.WEAK:
+            ssl_mode = weak_ssl_context
         else:
-            weak_ssl = None
-        client = RestClient(ssl=weak_ssl)
+            ssl_mode = None
+        client = RestClient(ssl=ssl_mode)
         encryption = (
             Encryption.HTTPS if data.get(CONF_USE_HTTPS, False) else Encryption.NONE
         )
@@ -272,7 +281,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self.context["channels"] = _simple_channels(channels)
                         if self.options is None or OPT_CHANNELS not in self.options:
                             return await self.async_step_channels(self.options, {})
-
         except reo_errors.ReolinkConnectionError:
             errors = {"base": "cannot_connect"}
             return await self.async_step_connection(data, errors)
@@ -293,6 +301,20 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data[CONF_HOST],
             )
             return self.async_abort(reason="device_error")
+        except aiohttp.ClientResponseError as http_error:
+            if (
+                http_error.status in (301, 302, 308)
+                and "location" in http_error.headers
+            ):
+                location = http_error.headers["location"]
+                if not client.secured and location.startswith("https://"):
+                    self.data[CONF_USE_HTTPS] = True
+                    return await self.async_step_user()
+                elif client.secured and location.startswith("http://"):
+                    del self.data[CONF_USE_HTTPS]
+                    return await self.async_step_user()
+
+            return self.async_abort(reason="response_error")
         except ssl.SSLError as ssl_error:
             if (
                 ssl_error.errno
@@ -300,12 +322,12 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # and ssl_error.reason == "SSLV3_ALERT_HANDSHAKE_FAILURE"
             ):
                 _LOGGER.warning(
-                    "Device %s only supports weak (deprecated) SSL, enabling weak support for this device. If SSL is not necessary, please consider disabling SSL on device, otherwise I STRONGLY advise upgrading the device firmware or replacing the device.",
+                    "Device %s certificate only supports a weak (deprecated) key, enabling INSECURE SSL support for this device. If SSL is not necessary, please consider disabling SSL on device, or manually installing a strong certificate.",
                     data[CONF_HOST],
                 )
                 if self.options is None:
                     self.options = {}
-                self.options[OPT_WEAK_SSL] = True
+                self.options[OPT_SSL] = SSLMode.INSECURE
                 return await self.async_step_user(user_input)
             _LOGGER.exception("SSL error occurred")
             return await self.async_step_connection(data, {"base": "unknown"})
@@ -490,12 +512,9 @@ class OptionsFlow(config_entries.OptionsFlow):
         if self.config_entry.data.get(CONF_USE_HTTPS, False):
             schema[
                 vol.Required(
-                    OPT_WEAK_SSL,
-                    description={
-                        "suggested_value": user_input.get(OPT_WEAK_SSL, False)
-                    },
+                    OPT_SSL, default=str(user_input.get(OPT_SSL, SSLMode.NORMAL))
                 )
-            ] = bool
+            ] = cv.multi_select({mode.value: mode.name for mode in SSLMode})
 
         return self.async_show_form(
             step_id="options",

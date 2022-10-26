@@ -11,10 +11,13 @@ from urllib.parse import quote
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
 from homeassistant.helpers.entity_platform import (
     AddEntitiesCallback,
     # async_get_current_platform,
 )
+
+from homeassistant.loader import async_get_integration
 
 from homeassistant.components.camera import (
     Camera,
@@ -146,9 +149,10 @@ async def async_setup_entry(
 ):
     """Setup camera entities"""
 
-    _LOGGER.debug("Setting up camera")
     domain_data: DomainData = hass.data[DOMAIN]
     entry_data = domain_data[config_entry.entry_id]
+
+    _LOGGER.debug("Setting up.")
 
     coordinator = entry_data.coordinator
 
@@ -184,6 +188,7 @@ async def async_setup_entry(
         if not otypes or not stypes:
             continue
 
+        enabled = False
         main: OutputStreamTypes = None
         first: OutputStreamTypes = None
         for camera_info in CAMERAS:
@@ -243,14 +248,38 @@ async def async_setup_entry(
                         description.stream_type.name,
                     )
 
+                if not enabled and description.entity_registry_enabled_default:
+                    enabled = True
                 entities.append(
                     ReolinkCamera(
                         coordinator, camera_info[0] | features, description, channel
                     )
                 )
 
+        if not enabled:
+            # platform = async_get_current_platform()
+            self = await async_get_integration(hass, DOMAIN)
+            async_create_issue(
+                hass,
+                DOMAIN,
+                "no_enabled_cameras",
+                is_fixable=True,
+                # issue_domain=platform.domain,
+                severity=IssueSeverity.WARNING,
+                translation_key="no_enabled_cameras",
+                translation_placeholders={
+                    "entry_id": config_entry.entry_id,
+                    "channel": channel,
+                    "name": data.channels[channel].device["name"],
+                    "configuration_url": data.device["configuration_url"],
+                },
+                learn_more_url=self.documentation + "/Camera-Stream",
+            )
+
     if entities:
         async_add_entities(entities)
+
+    _LOGGER.debug("Finished setup")
 
 
 class ReolinkCamera(ReolinkEntity, Camera):

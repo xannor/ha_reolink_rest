@@ -14,8 +14,11 @@ from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_point_in_utc_time
+from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt
+
+from homeassistant.loader import async_get_integration
 
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
@@ -461,6 +464,9 @@ async def async_setup_entry(
         update_coordinators()
 
         if _capabilities.onvif:
+            # platform = async_get_current_platform()
+            self = await async_get_integration(hass, DOMAIN)
+
             webhooks = async_get_webhook_manager(hass)
             if webhooks is not None:
                 webhook = webhooks.async_register(hass, config_entry)
@@ -478,7 +484,7 @@ async def async_setup_entry(
                 resub_cleanup = None
                 onvif_warned = False
 
-                def _sub_failure(entry_id: str):
+                def _sub_failure(entry_id: str, method: str, code: str, reason: str):
                     nonlocal subscription, resub_cleanup, onvif_warned
                     if entry_id != config_entry.entry_id or config_entry.data is None:
                         return
@@ -487,11 +493,26 @@ async def async_setup_entry(
                         subscription = None
                         update_coordinators()
                     subscription = None
-                    if not coordinator.data.ports.onvif.enabled and not onvif_warned:
-                        onvif_warned = True
-                        coordinator.logger.warning(
-                            "ONVIF not enabled for device %s, forcing polling mode",
-                            coordinator.data.device["name"],
+                    if not coordinator.data.ports.onvif.enabled:
+                        if not onvif_warned:
+                            onvif_warned = True
+                            coordinator.logger.warning(
+                                "ONVIF not enabled for device %s, forcing polling mode",
+                                coordinator.data.device["name"],
+                            )
+                        async_create_issue(
+                            hass,
+                            DOMAIN,
+                            "onvif_disabled",
+                            is_fixable=True,
+                            severity=IssueSeverity.WARNING,
+                            translation_key="onvif_disabled",
+                            translation_placeholders={
+                                "entry_id": config_entry.entry_id,
+                                "name": data.device["name"],
+                                "configuration_url": data.device["configuration_url"],
+                            },
+                            learn_more_url=self.documentation + "/ONVIF",
                         )
 
                     def _sub_resub():

@@ -69,5 +69,81 @@
       }
     }
   },
-  "device_automation": {}
+  "device_automation": {},
+  "issues":
+  {
+    "weak_ssl": {
+      "title": "{name} SSL Certificate issue",
+      "description": "An unverifiable certificate was provided",
+      "fix_flow": {
+        "flow_title": "{name}",
+        "step": {
+          "confirm": {
+            "title": "Turn off Certificate verification (Weak SSL Mode)",
+            "description": "Press SUBMIT to turn off certificate verification for {name}, allowing self-signed or invalid certificates to be accepted."
+          }
+        }
+      }
+    },
+    "insecure_ssl": {
+      "title": "{name} SSL Certificate issue",
+      "description": "A SSL certificate with a weak security key was provided",
+      "fix_flow": {
+        "flow_title": "{name}",
+        "step": {
+          "confirm": {
+            "title": "Turn off SSL security recommendations (INSECURE SSL Mode)",
+            "description": "Press SUBMIT to turn off ssl security recommendations for {name}, allowing weak/vulrnable SSL certificates to be accepted."
+          }
+        }
+      }
+    },
+    "from_ssl_redirect": {
+      "title": "{name} not accepting SSL",
+      "description": "Device refused a secure connection and wants an insecure connection instead",
+      "fix_flow": {
+        "flow_title": "{name}",
+        "step": {
+          "confirm": {
+            "title": "Turn off SSL",
+            "description": "Press SUBMIT to turn off use of SSL for connections to {name}."
+          }
+        }
+      }
+    },
+    "to_ssl_redirect": {
+      "title": "{name} requiring SSL",
+      "description": "Device refused an insecure connection and wants an secure connection instead",
+      "fix_flow": {
+        "flow_title": "{name}",
+        "step": {
+          "confirm": {
+            "title": "Turn on SSL",
+            "description": "Press SUBMIT to turn on use of SSL for connections to {name}."
+          }
+        }
+      }
+    },
+    "no_enabled_cameras": {
+      "title": "{name} has no available streams",
+      "description": "All possible streams on {name} are disabled by device settings, please enable at least one stream format in the configuration: {configuration_url}"
+    },
+    "onvif_disabled": {
+      "title": "{name} has ONVIF disabled",
+      "description": "ONVIF is used so the camera can push motion events instead of having Home Assistant constantly poll it for them. It is recommended to enable ONVIF on the camera: {configuration_url}"
+    },
+    "http_error": {
+      "title": "{name} communication error",
+      "description": "The device returned an unknown error when attemting to communicate, it is recommended to reboot the device, or wait for a couple of hours for it to possibly clear up on its own.",
+      "fix_flow": {
+        "flow_title": "{name}",
+        "step": {
+          "confirm": {
+            "title": "Reboot {name}",
+            "description": "The device {name} encountered a critical error and needs to be restarted for the integration to continue to communicate with it. Press SUBMIT once the device has rebooted."
+          }
+        }
+      }
+    }
+  }
 }

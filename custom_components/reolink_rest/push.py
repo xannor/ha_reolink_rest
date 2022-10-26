@@ -10,7 +10,7 @@ from enum import Enum
 import hashlib
 
 import logging
-from typing import Callable, Final, TypeVar, overload
+from typing import Callable, Final, Protocol, TypeVar, overload
 
 import secrets
 
@@ -240,6 +240,13 @@ class PushSubscription:
             object.__setattr__(self, "expires", dt.parse_duration(self.expires))
 
 
+class ErrorCallback(Protocol):
+    """Callback for Push errors"""
+
+    def __call__(self, entry_id: str, method: str, code: str, reason: str) -> None:
+        ...
+
+
 class PushManager:
     """Push Manager"""
 
@@ -252,7 +259,7 @@ class PushManager:
         self._renew_id = None
         self._next_renewal = None
         self._renew_task = None
-        self._on_failure: list[Callable[[str], None]] = []
+        self._on_failure: list[ErrorCallback] = []
 
     async def _ensure_subscriptions(self):
         if self._subscriptions is not None:
@@ -316,6 +323,9 @@ class PushManager:
         url: str,
         entry_id: str,
         save: bool,
+        method: str,
+        code: str,
+        reason: str,
     ):
         # def _retry():
         #    cleanup()
@@ -328,7 +338,7 @@ class PushManager:
         # cleanup = coordinator.async_add_listener(_retry)
 
         for handler in self._on_failure:
-            handler(entry_id)
+            handler(entry_id, method, code, reason)
 
     def _cancel_renew(self):
         if self._renew_task and not self._renew_task.cancelled():
@@ -443,7 +453,9 @@ class PushManager:
             except client_exceptions.ServerDisconnectedError:
                 raise
         if response is None:
-            self._handle_failed_subscription(url, entry_id, save)
+            self._handle_failed_subscription(
+                url, entry_id, save, "subscribe", "No Response", "No Response"
+            )
             return None
 
         status, response = response
@@ -455,7 +467,9 @@ class PushManager:
                 "Camera (%s) refused subscription request, probably needs a reboot.",
                 entity_data.device_info.name,
             )
-            self._handle_failed_subscription(url, entry_id, save)
+            self._handle_failed_subscription(
+                url, entry_id, save, "subscribe", code, reason
+            )
             return None
 
         response = response.find(f".//{_Namespaces.WSNT.tag('SubscribeResponse')}")
@@ -513,7 +527,7 @@ class PushManager:
             )
             if url is not None:
                 return await self._subscribe(url, entry_id, save)
-            self._handle_failed_subscription(url, entry_id, save)
+            self._handle_failed_subscription(url, entry_id, save, "renew", code, reason)
             return None
 
         response = response.find(f".//{_Namespaces.WSNT.tag('RenewResponse')}")
@@ -601,7 +615,7 @@ class PushManager:
         await self._unsubscribe(entry_id)
         return True
 
-    def async_on_subscription_failure(self, callback: Callable[[str], None]):
+    def async_on_subscription_failure(self, callback: ErrorCallback):
         self._on_failure.append(callback)
 
         def _remove():

@@ -1,33 +1,39 @@
-A Home Assistant custom integration for Reolink IP Devices (what support web)
+[![GitHub Release][releases-shield]][releases]
+[![GitHub Activity][commits-shield]][commits]
+[![License][license-shield]][license]
 
-This will add support for ReoLink cameras (and some devices) and works well with my other addon [Reolink Discovery](https://github.com/xannor/ha_reolink_discovery)
+[![hacs][hacsbadge]][hacs]
+[![Project Maintenance][maintenance-shield]][user_profile]
 
-Features
 
-- Supports defining mutliple streams for a device, depending on what is supported, only activates "best" stream for each type, e.g. RTSP Main, RTMP Sub, RTMP Ext.
+[![Community Forum][forum-shield]][forum]
 
-- Supports providing an RTMP, RTSP, and MJPEG stream, RTMP is preferred as RTSP requires a webrtc addon for home assistant. RTMP does not support H256 so high def cameras will only have an RTSP or MJPEG Main stream.
+_A Home Assistant custom integration for Reolink IP Devices_
 
-- Supports multi channel devices, with the channels provided as sub-devices under the main device.
+{% if not installed %}
+## Installation
 
-- Single connection per device/service (each stream will be a new connection and onvif requires a separate connection) to limit authentication logins/issues
+1. Click install.
+1. In the HA UI go to "Configuration" -> "Integrations" click "+" and search for "ReoLink IP Devices".
 
-Planned:
+{% endif %}
 
-- Media browser for viewing/downloading recordings
-- PTZ services
-- Alternative to ONVIF for motion detection
+## Configuration is done in the UI
 
-Tested Devices:
+<!---->
 
-- DUO
-- 511W
-- 810A
-- 820A
-- 520A
-- 410
+***
 
-Unsupported Devices:
-
-- any E series not conencted via NVR
-- any camrea that does not provide a web interface
+[reolink_discovery]: https://github.com/xannor/ha_reolink_rest
+[commits-shield]: https://img.shields.io/github/commit-activity/y/xannor/ha_reolink_rest.svg?style=for-the-badge
+[commits]: https://github.com/xannor/ha_reolink_rest/commits/master
+[hacs]: https://hacs.xyz
+[hacsbadge]: https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge
+[forum-shield]: https://img.shields.io/badge/community-forum-brightgreen.svg?style=for-the-badge
+[forum]: https://community.home-assistant.io/
+[license]: https://github.com/xannor/ha_reolink_rest/blob/main/LICENSE
+[license-shield]: https://img.shields.io/github/license/xannor/ha_reolink_rest.svg?style=for-the-badge
+[maintenance-shield]: https://img.shields.io/badge/maintainer-Xannor%20%40xannor-blue.svg?style=for-the-badge
+[releases-shield]: https://img.shields.io/github/release/xannor/ha_reolink_rest.svg?style=for-the-badge
+[releases]: https://github.com/xannor/ha_reolink_rest/releases
+[user_profile]: https://github.com/xannor

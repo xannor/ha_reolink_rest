@@ -1,8 +1,6 @@
 # Loads default set of integrations. Do not remove.
 default_config:
 
-#homeassistant:
-#  internal_url: !env_var INTERNAL_URL
 logger:
   default: warning
   logs:

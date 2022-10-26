@@ -1,7 +1,10 @@
 """Constants"""
 from __future__ import annotations
+from enum import auto
 
 from typing import Final
+
+from homeassistant.backports.enum import StrEnum
 
 DOMAIN: Final = "reolink_rest"
 DISCOVERY_EVENT: Final = "reolink_discovery"
@@ -18,21 +21,15 @@ OPT_CHANNELS: Final = "channels"
 OPT_PREFIX_CHANNEL: Final = "prefix_channel"
 OPT_HISPEED_INTERVAL: Final = "hispeed_interval"
 OPT_BATCH_ABILITY: Final = "batch_abilitiy"
-OPT_WEAK_SSL: Final = "weak_ssl"
+OPT_SSL: Final = "ssl_setting"
+
+
+class SSLMode(StrEnum):
+    """SSL Mode"""
+
+    NORMAL = "normal"
+    WEAK = "weak"
+    INSECURE = "insecure"
+
 
 DATA_ONVIF: Final = "onvif"
-
-# keep? ---\/
-
-
-# LIGHT_TYPE: Final[dict[LightTypes, LightEntityDescription]] = {
-#    LightTypes.IR: LightEntityDescription(
-#        key="LightTyps.IR", name="IR", entity_category=EntityCategory.CONFIG
-#    ),
-#    LightTypes.POWER: LightEntityDescription(
-#        key="LightTypes.Power", name="Power", entity_category=EntityCategory.CONFIG
-#    ),
-#    LightTypes.WHITE: LightEntityDescription(
-#        key="LightTypes.White", name="Floodlight", entity_category=EntityCategory.CONFIG
-#    ),
-# }
