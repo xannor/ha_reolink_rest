@@ -27,7 +27,7 @@ from homeassistant.components.binary_sensor import (
 )
 
 from async_reolink.api.system import capabilities
-from async_reolink.api.ai.typing import AITypes, Config as AIConfig
+from async_reolink.api.ai.typing import AITypes, Config as AIConfig, AlarmState
 
 from .push import async_get_push_manager, async_parse_notification
 
@@ -97,7 +97,7 @@ class ChannelMotionStateData(Protocol):
     """Channel Motion State Data"""
 
     detected: bool
-    ai: Mapping[AITypes, bool]
+    ai: Mapping[AITypes, AlarmState]
 
 
 class ChannelMotionData(Protocol):
@@ -560,8 +560,8 @@ class ReolinkMotionSensor(ReolinkEntity, BinarySensorEntity):
             self._attr_is_on = data.motion_state.detected
         else:
             self._attr_is_on = data.motion_state.ai.get(
-                self.entity_description.ai_type, False
-            )
+                self.entity_description.ai_type
+            ).state
         return super()._handle_coordinator_update()
 
     async def async_update(self) -> None:

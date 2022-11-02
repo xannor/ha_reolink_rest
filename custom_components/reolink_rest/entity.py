@@ -4,7 +4,7 @@ import ssl
 from time import time
 from types import SimpleNamespace
 
-from typing import TYPE_CHECKING, Mapping, Protocol, cast
+from typing import TYPE_CHECKING, Callable, Mapping, Protocol, cast
 import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant import config_entries
@@ -123,15 +123,18 @@ def _create_coordiator_data(**kwargs):
     queue = []
     responses = []
 
-    def _append(request):
-        queue.append(request)
+    def _append(request, force_unique=False):
+        if not force_unique or request not in queue:
+            queue.append(request)
 
-        def remove():
-            queue.remove(request)
+            def remove():
+                queue.remove(request)
 
-        return remove
+            return remove
 
     def _index(request):
+        if callable(request):
+            return next((i for i, item in queue if request(item)))
         return queue.index(request)
 
     kwargs["append"] = _append
@@ -447,9 +450,7 @@ def create_low_frequency_data_update(
             if updated_device and updated_device != device:
                 device = updated_device
                 if data.device is None:
-                    data.device = _create_device_info(
-                        updated_device, registry, registry
-                    )
+                    data.device = _create_device_info(updated_device, registry)
                 else:
                     data.device.update(_create_device_info(updated_device, registry))
 
@@ -1228,6 +1229,7 @@ class ReolinkEntity(CoordinatorEntity[ReolinkEntityDataUpdateCoordinator]):
     """Reolink Entity"""
 
     _channel_id: int
+    _generated_unique_id: bool | None
 
     def __init__(
         self,
@@ -1245,16 +1247,34 @@ class ReolinkEntity(CoordinatorEntity[ReolinkEntityDataUpdateCoordinator]):
         return super()._handle_coordinator_update()
 
     @property
-    def unique_id(self):
-        if self._attr_unique_id is None:
-            uid = (
-                self.coordinator.config_entry.unique_id
-                or self.coordinator.config_entry.entry_id
+    def _entry_data(self):
+        domain_data: DomainData = self.hass.data[DOMAIN]
+        return domain_data[self.coordinator.config_entry.entry_id]
+
+    def _generate_unique_id(self):
+        self._generated_unique_id = True
+        device_info = self.device_info
+        description = (
+            self.entity_description if hasattr(self, "entity_description") else None
+        )
+        if (
+            self.hass is not None
+            and device_info is not None
+            and description is not None
+            and description.key is not None
+        ):
+            reg = device_registry.async_get(self.hass)
+            entry = reg.async_get_device(
+                device_info["identifiers"], device_info["connections"]
             )
-            uid += f"_ch_{self._channel_id}"
-            if hasattr(self, "entity_description"):
-                uid += f"_{self.entity_description.key}"
-            self._attr_unique_id = uid
+            if entry is not None:
+                return f"{entry.id}_{description.key}"
+        return None
+
+    @property
+    def unique_id(self):
+        if self._attr_unique_id is None and not self._generated_unique_id:
+            self._attr_unique_id = self._generate_unique_id()
         return super().unique_id
 
     @property

@@ -306,9 +306,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
         self._port_disabled_warn = False
 
     async def stream_source(self) -> str | None:
-        domain_data: DomainData = self.hass.data[DOMAIN]
-        client = domain_data[self.coordinator.config_entry.entry_id].client
-
+        client = self._entry_data.client
         if self.entity_description.output_type == OutputStreamTypes.RTSP:
             try:
                 url = await client.get_rtsp_url(
@@ -356,8 +354,7 @@ class ReolinkCamera(ReolinkEntity, Camera):
         return await super()._async_use_rtsp_to_webrtc()
 
     async def _async_camera_image(self):
-        domain_data: DomainData = self.hass.data[DOMAIN]
-        client = domain_data[self.coordinator.config_entry.entry_id].client
+        client = self._entry_data.client
         try:
             image = await client.get_snap(self._channel_id)
         except ReolinkResponseError as resperr:
@@ -377,8 +374,8 @@ class ReolinkCamera(ReolinkEntity, Camera):
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        ability = self.coordinator.data.abilities.channels[self._channel_id]
-        if not ability.snap:
+        _capabilities = self.coordinator.data.capabilities.channels[self._channel_id]
+        if not _capabilities.snap:
             return await super().async_camera_image(width, height)
 
         # throttle calls to one per channel at a time

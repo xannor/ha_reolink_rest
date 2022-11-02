@@ -20,7 +20,7 @@ OPT_DISCOVERY: Final = "discovery"
 OPT_CHANNELS: Final = "channels"
 OPT_PREFIX_CHANNEL: Final = "prefix_channel"
 OPT_HISPEED_INTERVAL: Final = "hispeed_interval"
-OPT_BATCH_ABILITY: Final = "batch_abilitiy"
+OPT_BATCH_CAPABILITIES: Final = "batch_capabilities"
 OPT_SSL: Final = "ssl_setting"
 
 

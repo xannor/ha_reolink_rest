@@ -8,7 +8,7 @@ from typing import Final
 
 # import voluptuous as vol
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import (
     AddEntitiesCallback,
@@ -22,16 +22,16 @@ from homeassistant.components.number import (
 )
 
 from async_reolink.api.system import capabilities
-from async_reolink.api.ptz import typings
+from async_reolink.api.ptz import typing
+
+from .const import DOMAIN
 
 from .entity import (
     ReolinkEntity,
     ReolinkEntityDataUpdateCoordinator,
 )
 
-from .typing import ReolinkDomainData
-
-from .const import DATA_COORDINATOR, DOMAIN
+from .typing import DomainData, RequestQueue
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -114,16 +114,16 @@ async def async_setup_entry(
     """Setup number platform"""
 
     _LOGGER.debug("Setting up numbers")
-    domain_data: ReolinkDomainData = hass.data[DOMAIN]
+    domain_data: DomainData = hass.data[DOMAIN]
     entry_data = domain_data[config_entry.entry_id]
-    coordinator = entry_data[DATA_COORDINATOR]
+    coordinator = entry_data.coordinator
 
     entities = []
     data = coordinator.data
-    abilities = data.abilities
+    _capabilities = data.capabilities
 
     for channel in data.channels.keys():
-        ability = abilities.channels[channel]
+        ability = _capabilities.channels[channel]
 
         features = 0
         if ability.ptz.type == capabilities.PTZType.AF:
@@ -152,6 +152,7 @@ class ReolinkPTZNumber(ReolinkEntity, NumberEntity):
     """Reolink PTZ Sensor Entity"""
 
     entity_description: ReolinkPTZNumberEntityDescription
+    _hispeed_callback: CALLBACK_TYPE | None
 
     def __init__(
         self,
@@ -169,47 +170,92 @@ class ReolinkPTZNumber(ReolinkEntity, NumberEntity):
     def _get_state(self):
         if self._attr_supported_features in ReolinkPTZNumberEntityFeature.FOCUS:
             return self.coordinator.data.ptz[self._channel_id].focus
-        elif self._attr_supported_features in ReolinkPTZNumberEntityFeature.ZOOM:
+        if self._attr_supported_features in ReolinkPTZNumberEntityFeature.ZOOM:
             return self.coordinator.data.ptz[self._channel_id].zoom
         return None
 
     def _update_state(self, value: int):
+        updated = value != self._attr_native_value if value is not None else False
         if value is None:
             self._attr_available = False
         else:
             self._attr_available = True
             self._attr_native_value = value
+        return updated
 
-    def _handle_coordinator_update(self) -> None:
-        self._update_state(self._get_state())
+    def _update_state_from_queue(
+        self, queue: RequestQueue, only_requeue_on_change: bool = False
+    ):
+        commands = self._entry_data.client.commands
+
+        changed = False
+        for response in queue.responses:
+            if (
+                commands.is_get_ptz_zoom_focus_response(response)
+                and response.channel_id == self._channel_id
+            ):
+                if self._attr_supported_features in ReolinkPTZNumberEntityFeature.FOCUS:
+                    if response.is_detailed:
+                        self._attr_native_min_value = response.state_range.focus.min
+                        self._attr_native_max_value = response.state_range.focus.max
+                    changed |= self._update_state(response.state.focus)
+                elif (
+                    self._attr_supported_features in ReolinkPTZNumberEntityFeature.ZOOM
+                ):
+                    if response.is_detailed:
+                        self._attr_native_min_value = response.state_range.zoom.min
+                        self._attr_native_max_value = response.state_range.zoom.max
+                    changed |= self._update_state(response.state.zoom)
+
+        if not only_requeue_on_change or changed:
+            queue.append(
+                commands.create_get_ptz_zoom_focus_request(self._channel_id), True
+            )
+            return True
+        return False
+
+    def _handle_coordinator_update(self):
+        self._update_state_from_queue(self.coordinator.data)
+        return super()._handle_coordinator_update()
+
+    def _handle_hispeed_coordinator_update(self):
+        if (
+            not self._update_state_from_queue(
+                self._entry_data.hispeed_coordinator.data, True
+            )
+            and self._hispeed_callback is not None
+        ):
+            self._hispeed_callback()
+            self._hispeed_callback = None
         return super()._handle_coordinator_update()
 
     async def async_added_to_hass(self) -> None:
-        self._update_state(self._get_state())
-        if self._attr_supported_features in ReolinkPTZNumberEntityFeature.FOCUS:
-            if (
-                _range := self.coordinator.data.ptz[self._channel_id].focus_range
-            ) is not None:
-                self._attr_native_min_value = _range.min
-                self._attr_native_max_value = _range.max
-        elif self._attr_supported_features in ReolinkPTZNumberEntityFeature.ZOOM:
-            if (
-                _range := self.coordinator.data.ptz[self._channel_id].zoom_range
-            ) is not None:
-                self._attr_native_min_value = _range.min
-                self._attr_native_max_value = _range.max
-        return await super().async_added_to_hass()
+        await super().async_added_to_hass()
+        client = self._entry_data.client
+        commands = client.commands
+        queue: RequestQueue = self.coordinator.data
+        request = commands.create_get_ptz_zoom_focus_request(self._channel_id)
+        request.response_type = commands.response_types.DETAILED
+        queue.append(request, True)
+        self.hass.create_task(self.coordinator.async_request_refresh())
 
     async def async_update(self) -> None:
         return await super().async_update()
 
     async def async_set_native_value(self, value: float) -> None:
         if self._attr_supported_features in ReolinkPTZNumberEntityFeature.FOCUS:
-            _op = typings.ZoomOperation.FOCUS
+            _op = typing.ZoomOperation.FOCUS
         elif self._attr_supported_features in ReolinkPTZNumberEntityFeature.ZOOM:
-            _op = typings.ZoomOperation.ZOOM
+            _op = typing.ZoomOperation.ZOOM
         else:
             raise NotImplementedError()
-        client = self.coordinator.data.client
-        await client.set_ptz_zoomfocus(int(value), _op, self._channel_id)
-        await self.coordinator.async_request_refresh()
+        client = self._entry_data.client
+        await client.set_ptz_zoom_focus(int(value), _op, self._channel_id)
+        coordinator = self._entry_data.hispeed_coordinator
+        queue: RequestQueue = coordinator.data
+        queue.append(
+            client.commands.create_get_ptz_zoom_focus_request(self._channel_id), True
+        )
+        self._hispeed_callback = coordinator.async_add_listener(
+            self._handle_hispeed_coordinator_update
+        )

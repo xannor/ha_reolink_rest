@@ -2,10 +2,13 @@
 
 from datetime import timedelta
 from typing import (
+    Callable,
+    Literal,
     Mapping,
     MutableMapping,
     Protocol,
     Sequence,
+    overload,
 )
 
 from aiohttp.web import Request, Response
@@ -63,12 +66,26 @@ class RequestQueue(Protocol):
         """current queue responses"""
         ...
 
+    @overload
     def append(self, request: commands.CommandRequest) -> CANCEL_CALLBACK:
         """Add request to queue, returns callback to remove pending request"""
         ...
 
+    @overload
+    def append(
+        self, request: commands.CommandRequest, force_unique: Literal[True]
+    ) -> CANCEL_CALLBACK | None:
+        """Add request to queue, checking for duplicates, returns callback to remove pending request if added"""
+        ...
+
+    @overload
     def index(self, request: commands.CommandRequest) -> int:
-        """Return the index of the command in the queue or -1 for not found"""
+        """Return the index of the command in the queue raise ValueError for not found"""
+        ...
+
+    @overload
+    def index(self, predicate: Callable[[commands.CommandRequest], bool]) -> int:
+        """Return the index of the command in the queue raise ValueError for not found"""
         ...
 
 
