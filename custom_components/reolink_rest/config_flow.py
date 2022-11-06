@@ -30,9 +30,7 @@ from async_reolink.rest.client import Client as RestClient
 from async_reolink.rest.connection.typing import Encryption
 from async_reolink.rest.errors import AUTH_ERRORCODES
 
-from .typing import DomainData
-
-from .entity import insecure_ssl_context, weak_ssl_context
+from .api import ReolinkRestApi, weak_ssl_context, insecure_ssl_context
 
 from .const import (
     DEFAULT_HISPEED_INTERVAL,
@@ -469,9 +467,9 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         menu = ["options"]
 
-        domain: DomainData = self.hass.data[DOMAIN]
-        entry_data = domain[self.config_entry.entry_id]
-        if len(entry_data.coordinator.data.capabilities.channels) > 1:
+        domain: dict = self.hass.data[DOMAIN]
+        api: ReolinkRestApi = domain[self.config_entry.entry_id]
+        if len(api.capabilities.channels) > 1:
             menu.append("channels")
 
         if len(menu) == 1:
@@ -531,12 +529,10 @@ class OptionsFlow(config_entries.OptionsFlow):
         if user_input is None:
             user_input = self.data
 
-        domain: DomainData = self.hass.data[DOMAIN]
-        entry_data = domain[self.config_entry.entry_id]
+        domain: dict = self.hass.data[DOMAIN]
+        api: ReolinkRestApi = domain[self.config_entry.entry_id]
 
-        schema = _channels_schema(
-            _simple_channels(entry_data.channel_statuses), **user_input
-        )
+        schema = _channels_schema(_simple_channels(api.channel_statuses), **user_input)
 
         return self.async_show_form(
             step_id="channels",

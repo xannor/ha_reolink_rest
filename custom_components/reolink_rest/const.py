@@ -6,6 +6,7 @@ from typing import Final
 
 from homeassistant.backports.enum import StrEnum
 
+BRAND: Final = "Reolink"
 DOMAIN: Final = "reolink_rest"
 DISCOVERY_EVENT: Final = "reolink_discovery"
 
