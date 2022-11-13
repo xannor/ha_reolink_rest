@@ -30,7 +30,7 @@ from async_reolink.rest.client import Client as RestClient
 from async_reolink.rest.connection.typing import Encryption
 from async_reolink.rest.errors import AUTH_ERRORCODES
 
-from .api import ReolinkRestApi, weak_ssl_context, insecure_ssl_context
+from .api import async_get_entry_data, weak_ssl_context, insecure_ssl_context
 
 from .const import (
     DEFAULT_HISPEED_INTERVAL,
@@ -125,22 +125,22 @@ def _auth_schema(require_password: bool = False, **defaults: UserDataType):
 
 
 def _simple_channels(channels: Mapping[int, ChannelStatus]):
-    return (
-        {i: channel.name for i, channel in channels.items()}
-        if channels is not None
-        else None
-    )
+    if channels is None:
+        return None
+
+    return {str(i): channel.name for i, channel in channels.items()}
 
 
-def _channels_schema(channels: dict, **defaults: UserDataType):
+def _channels_schema(__channels: dict, **defaults: UserDataType):
+    channels = defaults.get(OPT_CHANNELS, None)
+    if channels is not None:
+        channels = tuple(str(i) for i in channels)
     return {
         vol.Required(
             OPT_PREFIX_CHANNEL,
             default=defaults.get(OPT_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
         ): bool,
-        vol.Required(
-            OPT_CHANNELS, default=defaults.get(OPT_CHANNELS, set(channels.keys()))
-        ): cv.multi_select(channels),
+        vol.Required(OPT_CHANNELS, default=channels): cv.multi_select(__channels),
     }
 
 
@@ -432,7 +432,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None and errors is None:
             if not self.options:
                 self.options = {}
-            self.options.update(user_input)
+            channels = user_input.get("channels", None)
+            if channels is not None:
+                channels = tuple(int(i) for i in channels)
+            self.options.update(channels=channels)
             return await self.async_step_user(user_input)
 
         schema = _channels_schema(
@@ -467,16 +470,31 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         menu = ["options"]
 
-        domain: dict = self.hass.data[DOMAIN]
-        api: ReolinkRestApi = domain[self.config_entry.entry_id]
-        if len(api.capabilities.channels) > 1:
+        entry_data = async_get_entry_data(self.hass, self.config_entry.entry_id)
+        api = entry_data["client_data"]
+        if api.capabilities is not None and len(api.capabilities.channels) > 1:
             menu.append("channels")
 
         if len(menu) == 1:
             method = f"async_step_{menu[0]}"
             return await getattr(self, method)(user_input)
 
-        return self.async_show_menu(step_id=self.cur_step, menu_options=menu)
+        menu.append("commit")
+        self.context["menu"] = menu
+
+        return await self.async_step_menu()
+
+    async def async_step_menu(
+        self,
+        user_input: UserDataType | None = None,
+    ):
+        """Menu"""
+
+        menu = self.context.get("menu", None)
+        if menu is None:
+            return await self.async_step_commit()
+
+        return self.async_show_menu(step_id="menu", menu_options=menu)
 
     async def async_step_options(
         self,
@@ -484,6 +502,10 @@ class OptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] | None = None,
     ) -> FlowResult:
         """Options"""
+
+        if user_input is not None and errors is None:
+            self.data.update(**user_input)
+            return await self.async_step_menu()
 
         if user_input is None:
             user_input = self.data
@@ -526,13 +548,24 @@ class OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Channels"""
 
+        if user_input is not None and errors is None:
+            channels = user_input.get("channels", None)
+            if channels is not None:
+                if len(channels) > 0:
+                    channels = tuple(int(i) for i in channels)
+                else:
+                    channels = None
+            self.data.update(channels=channels)
+            return await self.async_step_menu()
+
         if user_input is None:
             user_input = self.data
 
-        domain: dict = self.hass.data[DOMAIN]
-        api: ReolinkRestApi = domain[self.config_entry.entry_id]
+        entry_data = async_get_entry_data(self.hass, self.config_entry.entry_id)
+        api = entry_data["client_data"]
 
-        schema = _channels_schema(_simple_channels(api.channel_statuses), **user_input)
+        channels = _simple_channels(api.channel_statuses)
+        schema = _channels_schema(channels, **user_input)
 
         return self.async_show_form(
             step_id="channels",
@@ -541,7 +574,9 @@ class OptionsFlow(config_entries.OptionsFlow):
             description_placeholders={},
         )
 
-    async def async_step_commit(self) -> FlowResult:
+    async def async_step_commit(
+        self, user_input: UserDataType | None = None
+    ) -> FlowResult:
         """Save Changes"""
 
         return self.async_create_entry(title="", data=self.data)

@@ -44,12 +44,12 @@
   },
   "options": {
     "step": {
-      "init": {
+      "menu": {
         "description": "Configuration Menu",
         "menu_options": {
           "options": "Device Options",
           "channels": "Device Channels",
-          "commit": "Done"
+          "commit": "Save"
         }
       },
       "options": {

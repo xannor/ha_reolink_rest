@@ -1,19 +1,17 @@
 """Reolink Entities"""
 
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Generic, TypeVar
+from homeassistant.helpers.entity import DeviceInfo
 
 from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     CoordinatorEntity,
 )
-from homeassistant.helpers import device_registry
 
-from async_reolink.rest.connection.models import CommandRequest
+from async_reolink.api.system import capabilities
 
-from .api import QueueResponse, ReolinkRestApi
-
-from .const import (
-    DOMAIN,
-)
+from .api import QueueResponse, async_get_entry_data
 
 # def _get_channels(
 #     abilities: system.Capabilities, options: Mapping[str, any] | None = None
@@ -644,44 +642,89 @@ from .const import (
 #             self.client = None
 
 
-ReolinkEntityDataUpdateCoordinator = DataUpdateCoordinator[QueueResponse]
+_T = TypeVar("_T")
 
 
-class ReolinkEntity(CoordinatorEntity[ReolinkEntityDataUpdateCoordinator]):
+@dataclass
+class ReolinkChannelEntityDescriptionMixin:
+    """Mixin for required keys"""
+
+    channel_id: int
+
+
+@dataclass
+class ReolinkDeviceSupportedEntityDescriptionMixin:
+    """Mixin for required keys"""
+
+    device_supported_fn: Callable[[capabilities.Capabilities], bool]
+
+
+@dataclass
+class ReolinkChannelSupportedEntityDescriptionMixin:
+    """Mixin for required keys"""
+
+    channel_id: int
+    channel_supported_fn: Callable[[capabilities.ChannelCapabilities], bool]
+
+
+_S = TypeVar("_S")
+
+
+@dataclass
+class ReolinkValueEntityDescriptionMixin(Generic[_S, _T]):
+    """Mixin for required keys"""
+
+    value_fn: Callable[[_S], _T]
+
+
+_C = TypeVar("_C", bound=DataUpdateCoordinator)
+
+
+@dataclass
+class ReolinkCoordinatorFactoryEntityDescriptionMixin(Generic[_C]):
+    """Mixin for required keys"""
+
+    coordinator_fn: Callable[[DataUpdateCoordinator], Awaitable[_C] | _C]
+
+
+class ReolinkEntity(CoordinatorEntity[DataUpdateCoordinator[_T]], Generic[_T]):
     """Reolink Entity"""
 
-    _generated_unique_id: bool | None
-
     def __init__(
-        self,
-        coordinator: ReolinkEntityDataUpdateCoordinator,
-        channel_id: int,
+        self, coordinator: DataUpdateCoordinator[_T], context: any = None
     ) -> None:
-        self._queue: list[CommandRequest] = []
-        super().__init__(coordinator, self._queue)
-        self._channel_id = channel_id
-        self._attr_device_info = self._api.channel_info[channel_id].device
-        self._attr_extra_state_attributes = {"channel": channel_id}
-        self._attr_unique_id_generated = False
+        super().__init__(coordinator, context)
+        if client_data := self._client_data:
+            if client_data.device_info.channels == 1:
+                self._attr_device_info = client_data.channel_info[0].device
+            elif device := client_data.device_entry:
+                self._attr_device_info = DeviceInfo(
+                    identifiers=device.identifiers.copy(),
+                    connections=device.connections.copy(),
+                )
+            if hasattr(self, "entity_description") and (
+                description := self.entity_description
+            ):
+                if isinstance(
+                    description,
+                    ReolinkChannelEntityDescriptionMixin,
+                ) and (channel_id := description.channel_id):
+                    self._attr_device_info = client_data.channel_info[channel_id].device
+                    self._attr_extra_state_attributes = {"channel": channel_id}
+                if description.key:
+                    self._attr_unique_id = coordinator.config_entry.unique_id
+                    if self._attr_unique_id is not None:
+                        self._attr_unique_id += f"_{self.entity_description.key}"
 
     @property
-    def _api(self) -> ReolinkRestApi:
-        domain_data: dict = self.coordinator.hass.data[DOMAIN]
-        return domain_data[self.coordinator.config_entry.entry_id]
+    def _entry_data(self):
+        return async_get_entry_data(
+            self.coordinator.hass, self.coordinator.config_entry.entry_id, False
+        )
 
     @property
-    def unique_id(self):
-        if not self._attr_unique_id_generated:
-            self._attr_unique_id_generated = True
-            if unique_id := self.coordinator.config_entry.unique_id:
-                if self.platform:
-                    unique_id += f"_{self.platform.domain}"
-                if hasattr(self, "entity_description") and self.entity_description.key:
-                    unique_id += f"_{self.entity_description.key}"
-            self._attr_unique_id = unique_id
-        return super().unique_id
+    def _client_data(self):
+        return self._entry_data.get("client_data", None)
 
-    @property
-    def channel_id(self):
-        """channel id"""
-        return self._channel_id
+
+ReolinkEntityWithQueue = ReolinkEntity[QueueResponse]
