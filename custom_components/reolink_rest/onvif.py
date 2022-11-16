@@ -15,7 +15,7 @@ from xml.etree import ElementTree as et
 
 from aiohttp import ClientSession, TCPConnector, client_exceptions
 
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, callback, async_get_hass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.singleton import singleton
@@ -94,6 +94,8 @@ def _duration_isoformat(value: timedelta):
     else:
         res = ""
     if value.seconds or value.microseconds:
+        if not res:
+            res = "P"
         res += "T"
         minutes = value.seconds // 60
         seconds = value.seconds % 60
@@ -408,19 +410,72 @@ def _fix_expires(data: dict):
     return data
 
 
-def _schedule_renewal(sub: Subscription, hass: HomeAssistant, entry_id: str):
+_ScheduledSubscriptions = deque[tuple[str, Subscription]]
+
+
+async def _async_run_next_renewal(
+    entry_id: str, sub: Subscription, hass: HomeAssistant
+):
+    result = await _renew(
+        sub,
+        hass.config_entries.async_get_entry(entry_id),
+        async_get_entry_data(hass, entry_id, False),
+    )
+    if isinstance(result, Subscription):
+        _schedule_renewal(entry_id, result, hass)
+        return
+    _schedule_next_renewal(_get_renewal_queue(hass), hass)
+
+
+def _run_next_renewal(subs: _ScheduledSubscriptions, hass: HomeAssistant | None = None):
+    entry_id, sub = subs.popleft()
+    if hass is None:
+        hass = async_get_hass()
+    domain_data: dict = hass.data[DOMAIN]
+    del domain_data["onvif_timer"]
+    hass.create_task(_async_run_next_renewal(entry_id, sub, hass))
+
+
+def _get_renewal_queue(hass: HomeAssistant) -> _ScheduledSubscriptions:
+    domain_data: dict = hass.data[DOMAIN]
+    return domain_data.setdefault("onviv_renewals", deque())
+
+
+def _schedule_next_renewal(
+    subs: _ScheduledSubscriptions, hass: HomeAssistant | None = None
+):
+    if len(subs) == 0:
+        return
+    entry_id, sub = next(iter(subs))
+    if hass is None:
+        hass = async_get_hass()
+    domain_data: dict = hass.data[DOMAIN]
+    entry_data = async_get_entry_data(hass, entry_id, False)
+    ttl = _expires(sub, entry_data)
+    if ttl is None:
+        # this should NEVER happen
+        raise SystemError()
+
+    delay = max(ttl.total_seconds() - 10, 0)
+    # shave off some seconds for safety
+    domain_data["onvif_timer"] = hass.loop.call_later(delay, _run_next_renewal, subs)
+
+
+def _schedule_renewal(
+    entry_id: str, sub: Subscription, hass: HomeAssistant | None = None
+):
     if not sub.expires:
         return
+    if hass is None:
+        hass = async_get_hass()
     domain_data: dict = hass.data[DOMAIN]
-    subs: deque[tuple[str, Subscription]] = domain_data.setdefault(
-        "onvif_subs", deque()
-    )
+    subs = _get_renewal_queue(hass)
     i = 0
     while i < len(subs) and subs[0][1].expires <= sub.expires:
         # bring the next subscripton to the front
         subs.rotate(1)
         i += 1
-    subs.appendleft((entry_id, subs))
+    subs.appendleft((entry_id, sub))
     # reset deque top
     subs.rotate(-i)
     # if we added further down we are done as the most recent did not change
@@ -430,35 +485,7 @@ def _schedule_renewal(sub: Subscription, hass: HomeAssistant, entry_id: str):
     if handle:
         handle.cancel()
 
-    def schedule_next():
-        _t = next(iter(subs), None)
-        if not _t:
-            return
-        entry_id, sub = _t
-        entry_data = async_get_entry_data(hass, entry_id)
-        ttl = _expires(sub, entry_data)
-        if ttl is None:
-            # this should NEVER happen
-            raise SystemError()
-
-        loop = hass.loop
-
-        def timer_call():
-            entry_id, sub = subs.popleft()
-            loop.create_task(
-                _renew(
-                    sub,
-                    hass.config_entries.async_get_entry(entry_id),
-                    async_get_entry_data(hass, entry_id, False),
-                )
-            )
-            schedule_next()
-
-        delay = max(ttl.total_seconds() - 10, 0)
-        # shave off some seconds for safety
-        domain_data["onvif_timer"] = loop.call_later(delay, timer_call)
-
-    schedule_next()
+    _schedule_next_renewal(subs, hass)
 
 
 async def async_get_subscription(url: str, hass: HomeAssistant, entry_id: str):
@@ -474,10 +501,10 @@ async def async_get_subscription(url: str, hass: HomeAssistant, entry_id: str):
             sub = Subscription(**token)
             if (ttl := _expires(sub, entry_data)) is not None:
                 if ttl.total_seconds() > 60:
-                    _schedule_renewal(sub, hass, entry_id)
+                    _schedule_renewal(entry_id, sub, hass)
                     return sub
                 await _unsubscribe(sub, config_entry, entry_data)
-                del data[entry_id]
+            del data[entry_id]
     else:
         data = {}
 
@@ -485,7 +512,7 @@ async def async_get_subscription(url: str, hass: HomeAssistant, entry_id: str):
     store.async_delay_save(lambda: data, 1)
     if not isinstance(sub, Subscription):
         return sub
-    _schedule_renewal(sub, config_entry, entry_data)
+    _schedule_renewal(entry_id, sub, hass)
     data[entry_id] = _fix_expires(dataclasses.asdict(sub))
     return sub
 

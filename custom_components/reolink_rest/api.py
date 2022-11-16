@@ -233,12 +233,14 @@ async def _ensure_connection(hass: HomeAssistant, entry_id: str):
                 "No host configured, and none discovered (was device lost?)"
             )
 
-        await client.connect(
+        if not await client.connect(
             host,
             config.get(CONF_PORT, None),
             config.get(CONF_TIMEOUT, DEFAULT_TIMEOUT),
             encryption=encryption,
-        )
+        ):
+            raise ConfigEntryNotReady(f"Could not connect to device {host}")
+
         if connection_id != client.connection_id:
             data.connection_id = client.connection_id
             data.authentication_id = None

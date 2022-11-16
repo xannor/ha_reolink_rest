@@ -6,5 +6,6 @@ __pycache__/
 .config/
 custom_components/reolink_discovery
 
+.env
 .libs
 .scripts

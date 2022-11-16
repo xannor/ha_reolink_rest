@@ -7,7 +7,7 @@ from typing import Final, Mapping
 
 from aiohttp.web import Request
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
@@ -68,47 +68,6 @@ class MotionData(Mapping[AITypes, bool]):
 
 
 MotionDataMap = Mapping[int, MotionData]
-
-
-# class ReolinkMotionDataCoordinator(SubUpdateCoordinator[QueueResponse, MotionDataMap]):
-#     """Reolink Motion Data Coordinator"""
-
-#     context: InlineCommandQueue
-
-#     def __init__(self, coordinator: DataUpdateCoordinator[QueueResponse]):
-#         super().__init__(coordinator, update_method=None, context=InlineCommandQueue())
-#         self.data = {}
-#         self.channels: dict[int, bool] = {}
-#         self.push = False
-
-#     @property
-#     def _entry_data(self):
-#         return async_get_entry_data(self.hass, self.config_entry.entry_id, False)
-
-#     @property
-#     def _client(self):
-#         return self._entry_data["client"]
-
-#     def _update_data(self):
-#         commands = self._client.commands
-#         data: dict[int, MotionData] = self.data
-#         for response in self.coordinator.data:
-#             if commands.is_get_md_response(response):
-#                 data.setdefault(
-#                     response.channel_id, MotionData()
-#                 ).detected = response.state
-#                 self.context.add(commands.create_get_md_state(response.channel_id))
-#             elif commands.is_get_ai_state_response(response):
-#                 motion = data.setdefault(response.channel_id, MotionData())
-#                 # pylint: disable=protected-access
-#                 if motion._ai is None:
-#                     motion._ai = response.state
-#                 else:
-#                     motion._ai.update(response.state)
-#                 self.context.add(
-#                     commands.create_get_ai_state_request(response.channel_id)
-#                 )
-#         return self.data
 
 
 @dataclasses.dataclass
@@ -187,9 +146,9 @@ class ReolinkMotionBinarySensorEntity(ReolinkEntity[MotionDataMap], BinarySensor
                 self._attr_is_on = self.coordinator.data[self._channel_id][
                     self._ai_type
                 ]
-        # self._attr_extra_state_attributes["update_method"] = (
-        #     "push" if self.coordinator.push else "polling"
-        # )
+        self._attr_extra_state_attributes["update_method"] = getattr(
+            self.coordinator, "update_method", "polling"
+        )
 
         return super()._handle_coordinator_update()
 
@@ -204,95 +163,102 @@ def _set_channel(
     )
 
 
-# async def _onvif_subscription(coordinator: DataUpdateCoordinator):
-#     if not webhook:
-#         return
+async def _setup_onvif(
+    coordinator: DataUpdateCoordinator,
+    motion_queue: RequestQueue,
+    success_callback: CALLBACK_TYPE,
+    fail_callback: CALLBACK_TYPE,
+):
+    if not webhook:
+        fail_callback()
+        return
 
-#     hass = coordinator.hass
-#     config_entry = coordinator.config_entry
-#     webhook_id = coordinator.config_entry.unique_id or config_entry.entry_id
+    hass = coordinator.hass
+    config_entry = coordinator.config_entry
+    webhook_id = coordinator.config_entry.unique_id or config_entry.entry_id
+    entry_data = async_get_entry_data(hass, coordinator.config_entry.entry_id, False)
+    client_data = entry_data["client_data"]
+    data: dict[int, MotionData] = coordinator.data
 
-#     async def update_listeners():
-#         # update listeners is separate task
-#         coordinator.async_update_listeners()
+    async def update_listeners():
+        # update listeners in a separate task
+        coordinator.async_update_listeners()
 
-#     async def update_channels():
-#         commands = api.client.commands
-#         queue = []
-#         for channel_id, has_ai in coordinator.channels.items():
-#             queue.append(commands.create_get_md_state(channel_id))
-#             if has_ai:
-#                 queue.append(commands.create_get_ai_state_request(channel_id))
+    async def update_channels():
+        queue = motion_queue.copy()
 
-#         data: dict[int, MotionData] = coordinator.data
-#         for response in await api.client.batch(queue):
-#             if commands.is_get_md_response(response):
-#                 data.setdefault(
-#                     response.channel_id, MotionData()
-#                 ).detected = response.state
-#             elif commands.is_get_ai_state_response(response):
-#                 state = data.setdefault(response.channel_id, MotionData())
-#                 # pylint: disable=protected-access
-#                 if isinstance(state._ai, AIState):
-#                     state._ai.update(response.state)
-#                 else:
-#                     state._ai = response.state
+        for response in await entry_data["client"].batch(queue):
+            if isinstance(response, alarm_command.GetMotionStateResponse):
+                data.setdefault(
+                    response.channel_id, MotionData()
+                ).detected = response.state
+            elif isinstance(response, ai_command.GetAiStateResponse):
+                state = data.setdefault(response.channel_id, MotionData())
+                # pylint: disable=protected-access
+                if isinstance(state._ai, AIState):
+                    state._ai.update(response.state)
+                else:
+                    state._ai = response.state
 
-#         await update_listeners()
+        await update_listeners()
 
-#     async def handler(hass: HomeAssistant, _webhook_id: str, request: Request):
-#         if "xml" not in request.content_type:
-#             return None
+    async def handler(hass: HomeAssistant, _webhook_id: str, request: Request):
+        if "xml" not in request.content_type:
+            return None
 
-#         motion = async_parse_notification(await request.text())
-#         if motion is None:
-#             return
+        motion = async_parse_notification(await request.text())
+        if motion is None:
+            return
 
-#         data = coordinator.data
-#         if not motion:
-#             for channel in data.values():
-#                 channel.clear()
-#             hass.create_task(update_listeners())
-#         elif api.device_info.channels == 1 and not coordinator.channels[0]:
-#             # for single channel, non ai, devices we only need to update detected
-#             data[0].detected = True
-#             hass.create_task(update_listeners())
-#         else:
-#             hass.create_task(update_channels())
+        if not motion:
+            for channel in data.values():
+                channel.clear()
+            hass.create_task(update_listeners())
+        elif client_data.device_info.channels == 1 and len(motion_queue) == 1:
+            # for single channel, non ai, devices we only need to update detected
+            data[0].detected = True
+            hass.create_task(update_listeners())
+        else:
+            hass.create_task(update_channels())
 
-#     try:
-#         url = get_url(hass, prefer_external=False, prefer_cloud=False)
-#     except NoURLAvailableError:
-#         coordinator.logger.warning(
-#             "Could not get internal url from system"
-#             ", will attempt external url but this is not preferred"
-#             ", please verify your installation."
-#         )
+    try:
+        url = get_url(hass, prefer_external=False, prefer_cloud=False)
+    except NoURLAvailableError:
+        coordinator.logger.warning(
+            "Could not get internal url from system"
+            ", will attempt external url but this is not preferred"
+            ", please verify your installation."
+        )
 
-#         try:
-#             url = get_url(hass, allow_cloud=False)
-#         except NoURLAvailableError:
-#             coordinator.logger.warning(
-#                 "Could not get an addressable url, disabling webook support"
-#             )
-#             return
+        try:
+            url = get_url(hass, allow_cloud=False)
+        except NoURLAvailableError:
+            coordinator.logger.warning(
+                "Could not get an addressable url, disabling webook support"
+            )
+            fail_callback()
+            return
 
-#     webhook.async_register(
-#         hass, DOMAIN, f"{config_entry.title} ONVIF", webhook_id, handler
-#     )
+    webhook.async_register(
+        hass, DOMAIN, f"{config_entry.title} ONVIF", webhook_id, handler
+    )
 
-#     def unregister():
-#         webhook.async_unregister(hass, webhook_id)
+    def unregister():
+        webhook.async_unregister(hass, webhook_id)
 
-#     config_entry.async_on_unload(unregister)
+    config_entry.async_on_unload(unregister)
 
-#     sub = await async_get_subscription(url, api)
-#     if isinstance(sub, tuple):
-#         # log error
-#         pass
-#     elif sub is not None:
-#         coordinator.coordinator = api.coordinator
-#         coordinator.push = True
+    try:
+        sub = await async_get_subscription(url, hass, coordinator.config_entry.entry_id)
+    except:
+        fail_callback()
+        raise
+    else:
+        if isinstance(sub, tuple):
+            # log error
+            fail_callback()
+        elif sub is not None:
+            success_callback()
 
 
 async def async_get_binary_sensor_entities(
@@ -316,7 +282,7 @@ async def async_get_binary_sensor_entities(
         if not isinstance(response, alarm_command.GetMotionStateResponse):
             return
         motion_data[response.channel_id].detected = response.state
-        motion_queue.add(
+        motion_queue.append(
             alarm_command.GetMotionStateRequest(response.channel_id), update_md_data
         )
 
@@ -324,11 +290,12 @@ async def async_get_binary_sensor_entities(
         if not isinstance(response, ai_command.GetAiStateResponse):
             return
         motion = motion_data[response.channel_id]
+        # pylint: disable=protected-access
         if isinstance(motion._ai, AIState):
             motion._ai.update(response.state)
         else:
             motion._ai = response.state
-        motion_queue.add(
+        motion_queue.append(
             ai_command.GetAiStateRequest(response.channel_id), update_ai_data
         )
 
@@ -396,16 +363,17 @@ async def async_get_binary_sensor_entities(
                     entry_data["coordinator"].logger,
                     name=f"{config_entry.title} Motion Data Coordinator",
                 )
+                coordinator.async_set_updated_data(motion_data)
             if ai_type:
                 if first_ai:
                     # we only want one command (and callback) per channel
                     first_ai = False
-                    motion_queue.add(
+                    motion_queue.append(
                         ai_command.GetAiStateRequest(status.channel_id),
                         update_ai_data,
                     )
             else:
-                motion_queue.add(
+                motion_queue.append(
                     alarm_command.GetMotionStateRequest(status.channel_id),
                     update_md_data,
                 )
@@ -442,10 +410,31 @@ async def async_get_binary_sensor_entities(
         def update_coordinator():
             coordinator.async_set_updated_data(motion_data)
 
-        cleanup = entry_data["hispeed_coordinator"].async_add_listener(
-            update_coordinator, motion_queue
-        )
+        cleanup: CALLBACK_TYPE = None
 
-        # if _capabilities.onvif and webhook is not None:
-        #     coordinator.hass.async_create_task(_onvif_subscription(coordinator))
+        def disable_hispeed():
+            nonlocal cleanup
+            if cleanup:
+                cleanup()
+            setattr(coordinator, "update_method", "push")
+            cleanup = entry_data["coordinator"].async_add_listener(
+                update_coordinator, motion_queue
+            )
+
+        def enable_hispeed():
+            nonlocal cleanup
+            if cleanup:
+                cleanup()
+            setattr(coordinator, "update_method", "polling")
+            cleanup = entry_data["hispeed_coordinator"].async_add_listener(
+                update_coordinator, motion_queue
+            )
+
+        if _capabilities.onvif:
+            hass.async_run_job(
+                _setup_onvif, coordinator, motion_queue, disable_hispeed, enable_hispeed
+            )
+        else:
+            enable_hispeed()
+
     return entities
