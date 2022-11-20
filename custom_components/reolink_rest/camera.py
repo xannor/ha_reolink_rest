@@ -5,7 +5,7 @@ from asyncio import Task
 import dataclasses
 from enum import IntEnum, auto
 import logging
-from typing import Callable, Final
+from typing import Final
 from urllib.parse import quote
 
 
@@ -28,7 +28,6 @@ from homeassistant.components.camera import (
 
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
-from async_reolink.api.system import capabilities
 
 from async_reolink.api.errors import ReolinkResponseError
 
@@ -39,13 +38,12 @@ from async_reolink.api.const import (
     DEFAULT_PASSWORD,
 )
 
-from .api import ChannelData, async_get_entry_data
+from .api import async_get_entry_data
 
 from .entity import (
     ReolinkEntity,
-    ReolinkChannelEntityDescriptionMixin,
-    ReolinkDeviceSupportedEntityDescriptionMixin,
-    ReolinkChannelSupportedEntityDescriptionMixin,
+    ChannelMixin,
+    DeviceSupportedMixin,
 )
 
 from .const import DOMAIN, OPT_CHANNELS
@@ -74,22 +72,16 @@ class ReolinkCameraEntityDescriptionMixin:
 
 @dataclasses.dataclass
 class ReolinkCameraEntityDescription(
-    ReolinkChannelEntityDescriptionMixin,
-    ReolinkDeviceSupportedEntityDescriptionMixin,
-    ReolinkChannelSupportedEntityDescriptionMixin,
+    ChannelMixin,
+    DeviceSupportedMixin,
     CameraEntityDescription,
     ReolinkCameraEntityDescriptionMixin,
 ):
     """Describe Reolink Camera Entity"""
 
     key: str = None
-    channel_id: int = 0
     features: CameraEntityFeature = _NO_FEATURE
     has_entity_name: bool = True
-    device_supported_fn: Callable[[capabilities.Capabilities], bool] = lambda _: True
-    channel_supported_fn: Callable[
-        [capabilities.ChannelCapabilities], bool
-    ] = lambda _: True
 
     def __post_init__(self):
         if self.key is None:
@@ -100,78 +92,95 @@ class ReolinkCameraEntityDescription(
             self.name = f"{self.output_type.name} {self.stream_type.name.title()}"
 
 
-def _set_channel(description: ReolinkCameraEntityDescription, channel: ChannelData):
-    return dataclasses.replace(
-        description,
-        key=f"ch{channel.channel_id}_{description.key}",
-        channel_id=channel.channel_id,
-    )
-
-
 CAMERAS: Final = (
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTMP,
         StreamTypes.MAIN,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=lambda device: device.rtmp,
-        channel_supported_fn=lambda channel: channel.main_encoding
-        == channel.main_encoding.value.H264,
+        device_supported_fn=DeviceSupportedMixin.simple_test(
+            lambda device: device.rtmp
+        ),
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.main_encoding == channel.main_encoding.value.H264
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTSP,
         StreamTypes.MAIN,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=lambda device: device.rtsp,
+        device_supported_fn=DeviceSupportedMixin.simple_test(
+            lambda device: device.rtsp
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTMP,
         StreamTypes.SUB,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=lambda device: device.rtmp,
-        channel_supported_fn=lambda channel: channel.live
-        in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB),
+        device_supported_fn=DeviceSupportedMixin.simple_test(
+            lambda device: device.rtmp
+        ),
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.live
+            in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB)
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTMP,
         StreamTypes.EXT,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=lambda device: device.rtmp,
-        channel_supported_fn=lambda channel: channel.live
-        == channel.live.value.MAIN_EXTERN_SUB,
+        device_supported_fn=DeviceSupportedMixin.simple_test(
+            lambda device: device.rtmp
+        ),
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.live == channel.live.value.MAIN_EXTERN_SUB
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTSP,
         StreamTypes.SUB,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=lambda device: device.rtsp,
-        channel_supported_fn=lambda channel: channel.live
-        in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB),
+        device_supported_fn=DeviceSupportedMixin.simple_test(
+            lambda device: device.rtsp
+        ),
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.live
+            in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB)
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTSP,
         StreamTypes.EXT,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=lambda device: device.rtsp,
-        channel_supported_fn=lambda channel: channel.live
-        == channel.live.value.MAIN_EXTERN_SUB,
+        device_supported_fn=DeviceSupportedMixin.simple_test(
+            lambda device: device.rtsp
+        ),
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.live == channel.live.value.MAIN_EXTERN_SUB
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.JPEG,
         StreamTypes.MAIN,
-        channel_supported_fn=lambda channel: channel.snap,
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.snap
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.JPEG,
         StreamTypes.SUB,
-        channel_supported_fn=lambda channel: channel.snap
-        and channel.live
-        in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB),
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.snap
+            and channel.live
+            in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB)
+        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.JPEG,
         StreamTypes.EXT,
-        channel_supported_fn=lambda channel: channel.snap
-        and channel.live == channel.live.value.MAIN_EXTERN_SUB,
+        channel_supported_fn=ChannelMixin.simple_test_and_set(
+            lambda channel: channel.snap
+            and channel.live == channel.live.value.MAIN_EXTERN_SUB
+        ),
     ),
 )
 
@@ -218,41 +227,54 @@ async def async_setup_entry(
         first: OutputStreamTypes = None
         name = info.device.get("name", info.device["default_name"])
         for camera in CAMERAS:
-            if not camera.device_supported_fn(
-                _capabilities
-            ) or not camera.channel_supported_fn(channel_capabilities):
+            description = camera
+            if (device_supported := description.device_supported_fn) and not (
+                description := device_supported(description, _capabilities, api)
+            ):
+                continue
+            if (channel_supported := description.channel_supported_fn) and not (
+                description := channel_supported(
+                    description, channel_capabilities, info
+                )
+            ):
                 continue
 
             if (
-                camera.output_type == OutputStreamTypes.RTSP
+                description.output_type == OutputStreamTypes.RTSP
                 and not api.ports.rtsp.enabled
             ) or (
-                camera.output_type == OutputStreamTypes.RTMP
+                description.output_type == OutputStreamTypes.RTMP
                 and not api.ports.rtmp.enabled
             ):
                 coordinator.logger.warning(
                     "(%s) is disabled on device (%s) so (%s) stream will be skipped",
-                    camera.output_type.name,
+                    description.output_type.name,
                     name,
-                    camera.stream_type.name,
+                    description.stream_type.name,
                 )
-
-            description = _set_channel(camera, info)
 
             if description.stream_type == StreamTypes.MAIN:
                 if not main:
                     main = description.output_type
                 else:
+                    if description is camera:
+                        description = dataclasses.replace(camera)
                     description.entity_registry_enabled_default = False
                 if not first:
                     first = description.output_type
             else:
                 if not first:
                     first = description.output_type
+                    if description is camera:
+                        description = dataclasses.replace(camera)
                     description.entity_registry_visible_default = False
                 elif description.output_type != first:
+                    if description is camera:
+                        description = dataclasses.replace(camera)
                     description.entity_registry_enabled_default = False
                 else:
+                    if description is camera:
+                        description = dataclasses.replace(camera)
                     description.entity_registry_visible_default = False
 
             if not enabled and description.entity_registry_enabled_default:
@@ -294,10 +316,10 @@ async def async_setup_entry(
     _LOGGER.debug("Finished setup")
 
 
-async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
-    """Unload Camera Entities"""
+# async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
+#     """Unload Camera Entities"""
 
-    return True
+#     return True
 
 
 class ReolinkCamera(ReolinkEntity, Camera):
@@ -313,7 +335,6 @@ class ReolinkCamera(ReolinkEntity, Camera):
         Camera.__init__(self)
         self.entity_description = description
         ReolinkEntity.__init__(self, coordinator)
-        self._channel_id = description.channel_id
         self._attr_supported_features = description.features
         self._attr_extra_state_attributes = {
             "output_type": description.output_type.name,

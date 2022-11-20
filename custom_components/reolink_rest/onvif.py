@@ -456,7 +456,7 @@ def _schedule_next_renewal(
         # this should NEVER happen
         raise SystemError()
 
-    delay = max(ttl.total_seconds() - 10, 0)
+    delay = min(ttl.total_seconds() - 10, 0)
     # shave off some seconds for safety
     domain_data["onvif_timer"] = hass.loop.call_later(delay, _run_next_renewal, subs)
 

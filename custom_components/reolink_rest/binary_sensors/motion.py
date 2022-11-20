@@ -10,7 +10,6 @@ from aiohttp.web import Request
 from homeassistant.core import HomeAssistant, CALLBACK_TYPE
 from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
-    BinarySensorEntityDescription,
     BinarySensorDeviceClass,
 )
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -27,15 +26,15 @@ from async_reolink.rest.ai.model import State as AIState, Config as AIConfig
 from async_reolink.rest.ai import command as ai_command
 from async_reolink.rest.alarm import command as alarm_command
 
-from .api import async_get_entry_data, ChannelData, RequestQueue
+from ..api import async_get_entry_data, RequestQueue
 
-from .entity import ReolinkEntity, ReolinkChannelEntityDescriptionMixin
+from ..entity import ChannelMixin, ReolinkEntity
 
-# from .coordinators import SubUpdateCoordinator
+from ..const import DOMAIN, OPT_CHANNELS
 
-from .const import DOMAIN, OPT_CHANNELS
+from ..onvif import async_get_subscription, async_parse_notification
 
-from .onvif import async_get_subscription, async_parse_notification
+from .model import ReolinkBinarySensorEntityDescription
 
 
 class MotionData(Mapping[AITypes, bool]):
@@ -71,13 +70,9 @@ MotionDataMap = Mapping[int, MotionData]
 
 
 @dataclasses.dataclass
-class ReolinkMotionSensorEntityDescription(
-    ReolinkChannelEntityDescriptionMixin,
-    BinarySensorEntityDescription,
-):
+class ReolinkMotionSensorEntityDescription(ReolinkBinarySensorEntityDescription):
     """Reolink Motion Sensor Entity Description"""
 
-    channel_id: int = 0
     has_entity_name: bool = True
     device_class: BinarySensorDeviceClass | str | None = BinarySensorDeviceClass.MOTION
 
@@ -151,16 +146,6 @@ class ReolinkMotionBinarySensorEntity(ReolinkEntity[MotionDataMap], BinarySensor
         )
 
         return super()._handle_coordinator_update()
-
-
-def _set_channel(
-    description: ReolinkAIMotionSensorEntityDescription, channel: ChannelData
-):
-    return dataclasses.replace(
-        description,
-        key=f"ch{channel.channel_id}_{description.key}",
-        channel_id=channel.channel_id,
-    )
 
 
 async def _setup_onvif(
@@ -378,7 +363,7 @@ async def async_get_binary_sensor_entities(
                     update_md_data,
                 )
 
-            description = _set_channel(motion, info)
+            description = ChannelMixin.set_channel(motion, info)
             entities.append(ReolinkMotionBinarySensorEntity(coordinator, description))
 
     # if config_queue is not None:
@@ -412,6 +397,7 @@ async def async_get_binary_sensor_entities(
 
         cleanup: CALLBACK_TYPE = None
 
+        # pylint: disable=not-callable
         def disable_hispeed():
             nonlocal cleanup
             if cleanup:

@@ -729,23 +729,28 @@ async def _execute_queue(client: Client, queue: RequestQueue):
     return tuple(responses)
 
 
-async def async_update_client_data(coordinator: DataUpdateCoordinator):
+async def async_update_client_data(
+    coordinator: DataUpdateCoordinator, *queues: RequestQueue
+):
     """Data Updater to ensure and update ClientData for related integration entry"""
     hass = coordinator.hass
     entry_id = coordinator.config_entry.entry_id
+
     queue, _, client, _ = await _create_primary_queue(hass, entry_id)
     return await _execute_queue(
         client,
-        _create_queue(queue, *coordinator.async_contexts()),
+        _create_queue(queue, *queues, *coordinator.async_contexts()),
     )
 
 
-async def async_update_queue(coordinator: DataUpdateCoordinator):
+async def async_update_queue(coordinator: DataUpdateCoordinator, *queues: RequestQueue):
     """Data Update to pull a command queue from a coordinator and batch the commands and provide the responses"""
     hass = coordinator.hass
     entry_id = coordinator.config_entry.entry_id
     _, client, _ = await _ensure_connection(hass, entry_id)
-    return await _execute_queue(client, _create_queue(*coordinator.async_contexts()))
+    return await _execute_queue(
+        client, _create_queue(*queues, *coordinator.async_contexts())
+    )
 
 
 # class ReolinkRestApi:

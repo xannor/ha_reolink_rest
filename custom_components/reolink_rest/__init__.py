@@ -22,6 +22,7 @@ from homeassistant.const import (
 from .discovery import async_discovery_handler
 
 from .api import (
+    RequestQueue,
     async_get_poll_interval,
     async_get_hispeed_poll_interval,
     async_update_client_data,
@@ -42,9 +43,9 @@ PLATFORMS: Final = [
     Platform.CAMERA,
     Platform.BINARY_SENSOR,
     # Platform.NUMBER,
-    # Platform.SENSOR,
+    Platform.SENSOR,
     # Platform.SWITCH,
-    # Platform.LIGHT,
+    Platform.LIGHT,
     # Platform.BUTTON,
 ]
 
@@ -84,8 +85,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not (coordinator := entry_data.get("coordinator", None)):
         first_load = True
 
+        global_queue = RequestQueue()
+
         async def update_method():
-            return await async_update_client_data(coordinator)
+            return await async_update_client_data(coordinator, global_queue)
 
         coordinator = DataUpdateCoordinator(
             hass,
@@ -95,11 +98,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             update_method=update_method,
         )
         entry_data["coordinator"] = coordinator
+        entry_data["coordinator_global_queue"] = global_queue
 
     if not (hispeed_coordinator := entry_data.get("hispeed_coordinator", None)):
 
+        global_hispeed_queue = RequestQueue()
+
         async def hispeed_update_method():
-            return await async_update_queue(hispeed_coordinator)
+            return await async_update_queue(hispeed_coordinator, global_hispeed_queue)
 
         hispeed_coordinator = DataUpdateCoordinator(
             hass,
@@ -109,6 +115,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             update_method=hispeed_update_method,
         )
         entry_data["hispeed_coordinator"] = hispeed_coordinator
+        entry_data["hispeed_coordinator_global_queue"] = global_hispeed_queue
 
     async def setup_platforms():
         if first_load:

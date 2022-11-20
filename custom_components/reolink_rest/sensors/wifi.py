@@ -11,28 +11,28 @@ from homeassistant.const import PERCENTAGE
 
 from async_reolink.api.network.command import GetWifiInfoResponse, GetWifiSignalResponse
 
-from ..entity import ReolinkValueEntityDescriptionMixin, _S, _T
+from ..entity import ReolinkValueEntityDescriptionMixin, _S, T
 
 from .sensor import ReolinkDeviceSensorEntityDescription
 
 
 @dataclass
 class ReolinkWifiSensorEntityDescription(
-    ReolinkDeviceSensorEntityDescription, ReolinkValueEntityDescriptionMixin[_S, _T]
+    ReolinkDeviceSensorEntityDescription, ReolinkValueEntityDescriptionMixin[_S, T]
 ):
     """Reolink Wifi Sensor Entity Description"""
 
 
 @dataclass
 class ReolinkWifiInfoSensorEntityDescription(
-    ReolinkWifiSensorEntityDescription[GetWifiInfoResponse, _T]
+    ReolinkWifiSensorEntityDescription[GetWifiInfoResponse, T]
 ):
     """Reolink Wifi Info Sensor Entity Description"""
 
 
 @dataclass
 class ReolinkWifiSignalSensorEntityDescription(
-    ReolinkWifiSensorEntityDescription[GetWifiSignalResponse, _T]
+    ReolinkWifiSensorEntityDescription[GetWifiSignalResponse, T]
 ):
     """Reolink Wifi Info Sensor Entity Description"""
 

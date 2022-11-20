@@ -13,7 +13,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 
-from .motion import async_get_binary_sensor_entities
+from .binary_sensors.motion import async_get_binary_sensor_entities
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ async def async_setup_entry(
     _LOGGER.debug("Finished setup")
 
 
-async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
-    """Unload Camera Entities"""
+# async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry):
+#     """Unload Camera Entities"""
 
-    return True
+#     return True
