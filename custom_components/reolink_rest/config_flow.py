@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import ssl
-from typing import Mapping, TypeVar
+from typing import TYPE_CHECKING, Final, Mapping, TypeVar
 from urllib.parse import urlparse
 import aiohttp
 
@@ -12,7 +12,16 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.typing import DiscoveryInfoType
+from homeassistant.data_entry_flow import AbortFlow
+
+from homeassistant.config_entries import DISCOVERY_SOURCES
+
+if TYPE_CHECKING:
+    from homeassistant.helpers import device_registry as helper_device_registry
+
+from ._utilities.hass_typing import hass_bound
 
 from homeassistant.const import (
     CONF_SCAN_INTERVAL,
@@ -30,9 +39,12 @@ from async_reolink.rest.client import Client as RestClient
 from async_reolink.rest.connection.typing import Encryption
 from async_reolink.rest.errors import AUTH_ERRORCODES
 
-from .api import async_get_entry_data, weak_ssl_context, insecure_ssl_context
+from .typing import DiscoveredDevice, DomainDataType
+
+from .api import ReolinkDeviceApi
 
 from .const import (
+    DATA_API,
     DEFAULT_HISPEED_INTERVAL,
     DEFAULT_PREFIX_CHANNEL,
     DEFAULT_SCAN_INTERVAL,
@@ -41,22 +53,15 @@ from .const import (
     OPT_HISPEED_INTERVAL,
     OPT_PREFIX_CHANNEL,
     OPT_CHANNELS,
-    OPT_DISCOVERY,
     OPT_SSL,
     SSLMode,
 )
 
+from ._utilities.dict import slice_keys
+
 _LOGGER = logging.getLogger(__name__)
 
 UserDataType = dict[str, any]
-
-_K = TypeVar("_K")
-_V = TypeVar("_V")
-
-
-def dslice(obj: dict[_K, _V], *keys: _K):
-    """slice dictionary"""
-    return ((k, obj[k]) for k in keys if k in obj)
 
 
 def _connection_schema(**defaults: UserDataType):
@@ -66,9 +71,7 @@ def _connection_schema(**defaults: UserDataType):
             CONF_PORT,
             description={"suggested_value": defaults.get(CONF_PORT, None)},
         ): cv.port,
-        vol.Optional(
-            CONF_USE_HTTPS, default=defaults.get(CONF_USE_HTTPS, vol.UNDEFINED)
-        ): bool,
+        vol.Optional(CONF_USE_HTTPS, default=defaults.get(CONF_USE_HTTPS, vol.UNDEFINED)): bool,
     }
 
 
@@ -135,80 +138,54 @@ def _channels_schema(__channels: dict, **defaults: UserDataType):
     channels = defaults.get(OPT_CHANNELS, None)
     if channels is not None:
         channels = tuple(str(i) for i in channels)
+    else:
+        channels = tuple()
     return {
         vol.Required(
             OPT_PREFIX_CHANNEL,
             default=defaults.get(OPT_PREFIX_CHANNEL, DEFAULT_PREFIX_CHANNEL),
         ): bool,
-        vol.Required(OPT_CHANNELS, default=channels): cv.multi_select(__channels),
+        vol.Optional(OPT_CHANNELS, default=channels): cv.multi_select(__channels),
     }
-
-
-def _create_unique_id(
-    *,
-    uuid: str | None = None,
-    device_type: str | None = None,
-    serial: str | None = None,
-    mac: str | None = None,
-):
-    if uuid is not None:
-        return f"uid_{uuid}"
-    uid = "device"
-    if mac is not None:
-        uid = +f"_mac_{mac.replace(':', '')}"
-    if device_type is not None and serial is not None:
-        uid += f"_type_{device_type}_ser_{serial}"
-    if len(uid) > 6:
-        return uid
-    return None
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for ReoLink"""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         super().__init__()
         self.data: UserDataType = None
         self.options: UserDataType = None
 
-    async def async_step_user(
-        self, user_input: dict[str, any] | None = None
-    ) -> FlowResult:
+    async def async_step_user(self, user_input: dict[str, any] | None = None) -> FlowResult:
         """Handle the intial step."""
         if user_input is None and self.init_data is None:
             return await self.async_step_connection()
+        if self.source in DISCOVERY_SOURCES and self.cur_step is None:
+            return self.async_show_progress_done(next_step_id="user")
+        if user_input:
+            if not self.data:
+                self.data = user_input
+            else:
+                self.data.update(user_input)
 
-        data = self.data
-        if data is None:
-            self.data = data = {}
-        if (
-            (CONF_HOST not in data)
-            and self.options is not None
-            and OPT_DISCOVERY in self.options
-        ):
-            data = self.data.copy()
-            if CONF_HOST not in data and "ip" in self.options[OPT_DISCOVERY]:
-                data[CONF_HOST] = self.options[OPT_DISCOVERY]["ip"]
+        data = self.data or {}
         if not _validate_connection_data(data):
             return await self.async_step_connection(data)
 
-        ssl_mode = (
-            SSLMode(self.options.get(OPT_SSL, SSLMode.NORMAL))
-            if self.options is not None
-            else SSLMode.NORMAL
-        )
-        if ssl_mode == SSLMode.INSECURE:
-            ssl_mode = insecure_ssl_context
-        elif ssl_mode == SSLMode.WEAK:
-            ssl_mode = weak_ssl_context
-        else:
-            ssl_mode = None
-        client = RestClient(ssl=ssl_mode)
-        encryption = (
-            Encryption.HTTPS if data.get(CONF_USE_HTTPS, False) else Encryption.NONE
-        )
+        api = ReolinkDeviceApi()
+        try:
+            await api.async_ensure_connection(self.hass, **data)
+            client = api.client
+        except Exception:
+            _LOGGER.exception("Unhandled exception occurred")
+            return await self.async_step_connection(data, {"base": "unknown"})
+
+        title: str = self.context.get("title_placeholders", {}).get("name", "Camera")
+
+        encryption = Encryption.HTTPS if data.get(CONF_USE_HTTPS, False) else Encryption.NONE
         try:
             await client.connect(
                 data[CONF_HOST],
@@ -220,7 +197,6 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_connection(data, {"base": "unknown"})
 
         connection_id = client.connection_id
-        title = (self.init_data or {}).get("name", "Camera")
         try:
             if not await client.login(
                 data.get(CONF_USERNAME, DEFAULT_USERNAME),
@@ -240,20 +216,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # check to see if login redirected us and update the base_url
             if client.connection_id != connection_id:
                 connection_id = client.connection_id
-                _user_data = {CONF_HOST: client.base_url}
+                _user_data: UserDataType = {CONF_HOST: client.base_url}
                 if _validate_connection_data(_user_data):
-                    _user_data = dict(
-                        dslice(_user_data, CONF_HOST, CONF_PORT, CONF_USE_HTTPS)
-                    )
+                    _user_data = dict(slice_keys(_user_data, CONF_HOST, CONF_PORT, CONF_USE_HTTPS))
                     data.update(_user_data)
                     _LOGGER.warning(
                         "Corrected camera(%s) port during setup, you can safely ignore previous warnings about redirecting.",
                         data[CONF_HOST],
                     )
 
-            capabilities = await client.get_capabilities(
-                data.get(CONF_USERNAME, DEFAULT_USERNAME)
-            )
+            capabilities = await client.get_capabilities(data.get(CONF_USERNAME, DEFAULT_USERNAME))
 
             if capabilities.device.info:
                 devinfo = await client.get_device_info()
@@ -261,17 +233,16 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if self.unique_id is None:
                     if capabilities.p2p:
                         p2p = await client.get_p2p()
-                    if capabilities.local_link:
+                        if p2p.uid:
+                            await self.async_set_unique_id(p2p.uid.upper())
+                    if self.unique_id is None and capabilities.local_link:
                         link = await client.get_local_link()
-                    unique_id = _create_unique_id(
-                        uuid=p2p.uid if p2p is not None else None,
-                        device_type=devinfo.type if devinfo is not None else None,
-                        serial=devinfo.serial if devinfo is not None else None,
-                        mac=link.mac if link is not None else None,
-                    )
-                    if unique_id is not None:
-                        await self.async_set_unique_id(unique_id)
-                        self._abort_if_unique_id_configured()
+                        if link.mac:
+                            device_registry: helper_device_registry = (
+                                self.hass.helpers.device_registry
+                            )
+                            await self.async_set_unique_id(device_registry.format_mac(link.mac))
+                    self._abort_if_unique_id_configured(updates=data)
 
                 if devinfo.channels > 1:
                     channels = await client.get_channel_status()
@@ -300,10 +271,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return self.async_abort(reason="device_error")
         except aiohttp.ClientResponseError as http_error:
-            if (
-                http_error.status in (301, 302, 308)
-                and "location" in http_error.headers
-            ):
+            if http_error.status in (301, 302, 308) and "location" in http_error.headers:
                 location = http_error.headers["location"]
                 if not client.secured and location.startswith("https://"):
                     self.data[CONF_USE_HTTPS] = True
@@ -336,36 +304,51 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         finally:
             await client.disconnect()
 
-        if (
-            self.options is not None
-            and OPT_DISCOVERY in self.options
-            and "ip" in self.options[OPT_DISCOVERY]
-            and data.get(CONF_HOST, None) == self.options[OPT_DISCOVERY]["ip"]
-        ):
-            # if we used discovery for host we wont keep in data so we fall back on discovery everytime
-            data.pop(CONF_HOST, None)
-
         return self.async_create_entry(title=title, data=data, options=self.options)
 
-    async def async_step_integration_discovery(
-        self, discovery_info: DiscoveryInfoType
-    ) -> FlowResult:
-        device = discovery_info
-        unique_id = _create_unique_id(
-            uuid=device.get("uuid", None), mac=device.get("mac")
-        )
-        if unique_id is not None:
-            await self.async_set_unique_id(unique_id)
-            self._abort_if_unique_id_configured()
-        if "name" in device:
-            self.context["title_placeholders"] = {"name": device["name"]}
+    async def _async_handle_discovery(self, discovery_info: DiscoveredDevice.JSON):
 
-        if self.options is None:
-            self.options = {}
-        self.options[OPT_DISCOVERY] = discovery_info
+        device_registry: helper_device_registry = self.hass.helpers.device_registry
+        entry = None
+        if uuid := discovery_info.get(DiscoveredDevice.Keys.uuid):
+            entry = await self.async_set_unique_id(uuid.upper())
+        elif mac := discovery_info.get(DiscoveredDevice.Keys.mac):
+            entry = await self.async_set_unique_id(device_registry.format_mac(mac))
+            if not entry:
+                # TODO : track all devices NiC macs in device registry so we can handle it
+                devices = device_registry.async_get(self.hass)
+                device = devices.async_get_device(
+                    set(), {(device_registry.CONNECTION_NETWORK_MAC, mac)}
+                )
+                if device:
+                    for id in device.config_entries:
+                        if (
+                            e := self.hass.config_entries.async_get_entry(id)
+                        ) and e.domain == self.handler:
+                            if entry:
+                                entry = None
+                                break
+                            else:
+                                entry = e
+                    if entry and entry.unique_id:
+                        await self.async_set_unique_id(entry.unique_id)
+        else:
+            raise AbortFlow("not_implemented")
 
-        await self._async_handle_discovery_without_unique_id()
-        return self.async_show_progress_done(next_step_id="user")
+        if ip := discovery_info.get(DiscoveredDevice.Keys.ip):
+            self.data = {CONF_HOST: ip}
+        self._abort_if_unique_id_configured(updates=self.data)
+
+        if name := discovery_info.get(DiscoveredDevice.Keys.name):
+            self.context["title_placeholders"] = {"name": name}
+
+    async def async_step_discovery(self, discovery_info: DiscoveryInfoType):
+        await self._async_handle_discovery(discovery_info)
+        return await super().async_step_discovery(discovery_info)
+
+    async def async_step_integration_discovery(self, discovery_info: DiscoveryInfoType):
+        await self._async_handle_discovery(discovery_info)
+        return await super().async_step_integration_discovery(discovery_info)
 
     async def async_step_connection(
         self,
@@ -376,9 +359,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None and errors is None:
             if _validate_connection_data(user_input):
-                user_input = dict(
-                    dslice(user_input, CONF_HOST, CONF_PORT, CONF_USE_HTTPS)
-                )
+                user_input = dict(slice_keys(user_input, CONF_HOST, CONF_PORT, CONF_USE_HTTPS))
                 if self.data is not None:
                     self.data.update(user_input)
                 else:
@@ -402,7 +383,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Authentication form"""
 
         if user_input is not None and errors is None:
-            user_input = dict(dslice(user_input, CONF_USERNAME, CONF_PASSWORD))
+            user_input = dict(slice_keys(user_input, CONF_USERNAME, CONF_PASSWORD))
             self.data.update(user_input)
             return await self.async_step_user(user_input)
 
@@ -434,13 +415,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self.options = {}
             channels = user_input.get("channels", None)
             if channels is not None:
-                channels = tuple(int(i) for i in channels)
+                if len(channels) == 0:
+                    channels = None
+                else:
+                    channels = tuple(int(i) for i in channels)
+
             self.options.update(channels=channels)
             return await self.async_step_user(user_input)
 
-        schema = _channels_schema(
-            self.context["channels"], **(user_input or self.options or {})
-        )
+        schema = _channels_schema(self.context["channels"], **(user_input or self.options or {}))
 
         return self.async_show_form(
             step_id="channels",
@@ -454,13 +437,10 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return OptionsFlow(config_entry)
 
 
-class OptionsFlow(config_entries.OptionsFlow):
+class OptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     """Handle an Options Flow for reolink"""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        super().__init__()
-        self.config_entry = config_entry
-        self.data: UserDataType = config_entry.options.copy()
+    _MENU: Final = tuple("options")
 
     async def async_step_init(
         self,
@@ -468,11 +448,12 @@ class OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Options form"""
 
-        menu = ["options"]
+        menu = list(self._MENU)
 
-        entry_data = async_get_entry_data(self.hass, self.config_entry.entry_id)
-        api = entry_data["client_data"]
-        if api.capabilities is not None and len(api.capabilities.channels) > 1:
+        domain_data: DomainDataType = self.hass.data[DOMAIN]
+        entry_data = domain_data[self.config_entry.entry_id]
+        api = entry_data[DATA_API]
+        if api.data.capabilities is not None and len(api.data.capabilities.channels) > 1:
             menu.append("channels")
 
         if len(menu) == 1:
@@ -514,9 +495,7 @@ class OptionsFlow(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_SCAN_INTERVAL,
                 description={
-                    "suggested_value": user_input.get(
-                        CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
-                    )
+                    "suggested_value": user_input.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
                 },
             ): int,
             vol.Optional(
@@ -531,9 +510,7 @@ class OptionsFlow(config_entries.OptionsFlow):
 
         if self.config_entry.data.get(CONF_USE_HTTPS, False):
             schema[
-                vol.Required(
-                    OPT_SSL, default=str(user_input.get(OPT_SSL, SSLMode.NORMAL))
-                )
+                vol.Required(OPT_SSL, default=str(user_input.get(OPT_SSL, SSLMode.NORMAL)))
             ] = cv.multi_select({mode.value: mode.name for mode in SSLMode})
 
         return self.async_show_form(
@@ -561,8 +538,9 @@ class OptionsFlow(config_entries.OptionsFlow):
         if user_input is None:
             user_input = self.data
 
-        entry_data = async_get_entry_data(self.hass, self.config_entry.entry_id)
-        api = entry_data["client_data"]
+        domain_data: DomainDataType = self.hass.data[DOMAIN]
+        entry_data = domain_data[self.config_entry.entry_id]
+        api = entry_data[DATA_API]
 
         channels = _simple_channels(api.channel_statuses)
         schema = _channels_schema(channels, **user_input)
@@ -574,9 +552,7 @@ class OptionsFlow(config_entries.OptionsFlow):
             description_placeholders={},
         )
 
-    async def async_step_commit(
-        self, user_input: UserDataType | None = None
-    ) -> FlowResult:
+    async def async_step_commit(self, user_input: UserDataType | None = None) -> FlowResult:
         """Save Changes"""
 
         return self.async_create_entry(title="", data=self.data)

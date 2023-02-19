@@ -5,21 +5,29 @@ from asyncio import Task
 import dataclasses
 from enum import IntEnum, auto
 import logging
-from typing import Final
+from typing import TYPE_CHECKING, Final, Mapping
 from urllib.parse import quote
 
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.issue_registry import IssueSeverity, async_create_issue
 from homeassistant.helpers.entity_platform import (
     AddEntitiesCallback,
     # async_get_current_platform,
 )
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from .typing import DomainDataType
+
+if TYPE_CHECKING:
+    from homeassistant.helpers import (
+        dispatcher as helper_dispatcher,
+        issue_registry as helper_issue_registry,
+    )
+from ._utilities.hass_typing import hass_bound
 
 from homeassistant.loader import async_get_integration
 
+from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.components.camera import (
     Camera,
     CameraEntityFeature,
@@ -38,15 +46,16 @@ from async_reolink.api.const import (
     DEFAULT_PASSWORD,
 )
 
-from .api import async_get_entry_data
+from .typing import DeviceSupportedCallback, ChannelSupportedCallback
+
+from .api import ReolinkDeviceApi
 
 from .entity import (
     ReolinkEntity,
-    ChannelMixin,
-    DeviceSupportedMixin,
+    ChannelDescriptionMixin,
 )
 
-from .const import DOMAIN, OPT_CHANNELS
+from .const import DATA_COORDINATOR, DOMAIN, OPT_CHANNELS, DATA_API
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,8 +81,7 @@ class ReolinkCameraEntityDescriptionMixin:
 
 @dataclasses.dataclass
 class ReolinkCameraEntityDescription(
-    ChannelMixin,
-    DeviceSupportedMixin,
+    ChannelDescriptionMixin,
     CameraEntityDescription,
     ReolinkCameraEntityDescriptionMixin,
 ):
@@ -85,11 +93,50 @@ class ReolinkCameraEntityDescription(
 
     def __post_init__(self):
         if self.key is None:
-            self.key = (
-                f"{self.output_type.name.lower()}_{self.stream_type.name.lower()}"
-            )
+            self.key = f"{self.output_type.name.lower()}_{self.stream_type.name.lower()}"
         if self.name is None:
             self.name = f"{self.output_type.name} {self.stream_type.name.title()}"
+
+
+_DEVICE_SUPPORTED: Final[
+    Mapping[OutputStreamTypes, DeviceSupportedCallback[ReolinkCameraEntityDescription]]
+] = {
+    OutputStreamTypes.RTMP: lambda _self, device, _: device.rtmp,
+    OutputStreamTypes.RTSP: lambda _self, device, _: device.rtsp,
+    OutputStreamTypes.JPEG: lambda _self, device, _: device.media_port,
+}
+
+_STREAM_SUPPORTED: Final[
+    Mapping[StreamTypes, ChannelSupportedCallback[ReolinkCameraEntityDescription]]
+] = {
+    StreamTypes.MAIN: lambda _self, channel, _: channel.live
+    in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB),
+    StreamTypes.EXT: lambda _self, channel, _: channel.live == channel.live.value.MAIN_EXTERN_SUB,
+}
+_STREAM_SUPPORTED[StreamTypes.SUB] = _STREAM_SUPPORTED[StreamTypes.MAIN]
+
+_CAP_SUPPORTED: ChannelSupportedCallback[
+    ReolinkCameraEntityDescription
+] = lambda _self, channel, _: channel.snap
+
+_CHANNEL_SUPPORTED: Final[
+    Mapping[
+        tuple[OutputStreamTypes, StreamTypes],
+        ChannelSupportedCallback[ReolinkCameraEntityDescription],
+    ]
+] = {}
+for __type, callback in _STREAM_SUPPORTED.items():
+    _CHANNEL_SUPPORTED[OutputStreamTypes.RTMP, __type] = callback
+    _CHANNEL_SUPPORTED[OutputStreamTypes.RTSP, __type] = callback
+
+    def _jpeg_support(
+        __callback: ChannelSupportedCallback[ReolinkCameraEntityDescription],
+    ) -> ChannelSupportedCallback[ReolinkCameraEntityDescription]:
+        return lambda self, channel, data: __callback(self, channel, data) and _CAP_SUPPORTED(
+            self, channel, data
+        )
+
+    _CHANNEL_SUPPORTED[OutputStreamTypes.JPEG, __type] = _jpeg_support(callback)
 
 
 CAMERAS: Final = (
@@ -97,90 +144,43 @@ CAMERAS: Final = (
         OutputStreamTypes.RTMP,
         StreamTypes.MAIN,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=DeviceSupportedMixin.simple_test(
-            lambda device: device.rtmp
-        ),
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.main_encoding == channel.main_encoding.value.H264
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTSP,
         StreamTypes.MAIN,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=DeviceSupportedMixin.simple_test(
-            lambda device: device.rtsp
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTMP,
         StreamTypes.SUB,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=DeviceSupportedMixin.simple_test(
-            lambda device: device.rtmp
-        ),
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.live
-            in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB)
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTMP,
         StreamTypes.EXT,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=DeviceSupportedMixin.simple_test(
-            lambda device: device.rtmp
-        ),
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.live == channel.live.value.MAIN_EXTERN_SUB
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTSP,
         StreamTypes.SUB,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=DeviceSupportedMixin.simple_test(
-            lambda device: device.rtsp
-        ),
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.live
-            in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB)
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.RTSP,
         StreamTypes.EXT,
         features=CameraEntityFeature.STREAM,
-        device_supported_fn=DeviceSupportedMixin.simple_test(
-            lambda device: device.rtsp
-        ),
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.live == channel.live.value.MAIN_EXTERN_SUB
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.JPEG,
         StreamTypes.MAIN,
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.snap
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.JPEG,
         StreamTypes.SUB,
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.snap
-            and channel.live
-            in (channel.live.value.MAIN_SUB, channel.live.value.MAIN_EXTERN_SUB)
-        ),
     ),
     ReolinkCameraEntityDescription(
         OutputStreamTypes.JPEG,
         StreamTypes.EXT,
-        channel_supported_fn=ChannelMixin.simple_test_and_set(
-            lambda channel: channel.snap
-            and channel.live == channel.live.value.MAIN_EXTERN_SUB
-        ),
     ),
 )
 
@@ -202,49 +202,45 @@ async def async_setup_entry(
 ):
     """Setup camera entities"""
 
-    entry_data = async_get_entry_data(hass, config_entry.entry_id, False)
-    api = entry_data["client_data"]
+    domain_data: DomainDataType = hass.data[DOMAIN]
+    entry_data = domain_data[config_entry.entry_id]
+    api = entry_data[DATA_API]
 
     _LOGGER.debug("Setting up.")
 
-    coordinator = entry_data["coordinator"]
+    coordinator = entry_data[DATA_COORDINATOR]
 
     # can_stream = "stream" in hass.config.components
 
     entities: list[ReolinkCamera] = []
-    _capabilities = api.capabilities
-    channels: list[int] = config_entry.options.get(OPT_CHANNELS, None)
-    for status in api.channel_statuses.values():
-        if not status.online or (
-            channels is not None and not status.channel_id in channels
-        ):
+    device_data = api.data
+    _capabilities = device_data.capabilities
+    channels: list[int] = config_entry.options.get(OPT_CHANNELS)
+    for status in device_data.channel_statuses.values():
+        if not status.online or (channels is not None and not status.channel_id in channels):
             continue
         channel_capabilities = _capabilities.channels[status.channel_id]
-        info = api.channel_info[status.channel_id]
+        info = device_data.channel_info[status.channel_id]
 
         enabled = False
         main: OutputStreamTypes = None
         first: OutputStreamTypes = None
         name = info.device.get("name", info.device["default_name"])
         for camera in CAMERAS:
-            description = camera
-            if (device_supported := description.device_supported_fn) and not (
-                description := device_supported(description, _capabilities, api)
+            if not _DEVICE_SUPPORTED[camera.output_type](camera, _capabilities, api):
+                continue
+            if not _CHANNEL_SUPPORTED[(camera.output_type, camera.stream_type)](
+                camera, channel_capabilities, info
             ):
                 continue
-            if (channel_supported := description.channel_supported_fn) and not (
-                description := channel_supported(
-                    description, channel_capabilities, info
-                )
-            ):
-                continue
+            description = camera.from_channel(info)
 
             if (
                 description.output_type == OutputStreamTypes.RTSP
-                and not api.ports.rtsp.enabled
+                and not device_data.ports.rtsp.enabled
             ) or (
                 description.output_type == OutputStreamTypes.RTMP
-                and not api.ports.rtmp.enabled
+                and not device_data.ports.rtmp.enabled
             ):
                 coordinator.logger.warning(
                     "(%s) is disabled on device (%s) so (%s) stream will be skipped",
@@ -281,25 +277,24 @@ async def async_setup_entry(
                 enabled = True
             entities.append(
                 ReolinkCamera(
-                    coordinator,
+                    api,
+                    config_entry,
                     description,
                 )
             )
 
         if not enabled:
-            url = info.device.get(
-                "configuration_url",
-                api.device_entry.name if api.device_entry is not None else None,
-            )
+            url = info.device.get("configuration_url")
             # platform = async_get_current_platform()
             self = await async_get_integration(hass, DOMAIN)
-            async_create_issue(
+            issue_registry: helper_issue_registry = hass.helpers.issue_registry
+            issue_registry.async_create_issue(
                 hass,
                 DOMAIN,
                 "no_enabled_cameras",
                 is_fixable=True,
                 # issue_domain=platform.domain,
-                severity=IssueSeverity.WARNING,
+                severity=issue_registry.IssueSeverity.WARNING,
                 translation_key="no_enabled_cameras",
                 translation_placeholders={
                     "entry_id": config_entry.entry_id,
@@ -329,12 +324,12 @@ class ReolinkCamera(ReolinkEntity, Camera):
 
     def __init__(
         self,
-        coordinator: DataUpdateCoordinator,
+        api: ReolinkDeviceApi,
+        config_entry: ConfigEntry,
         description: ReolinkCameraEntityDescription,
     ) -> None:
-        Camera.__init__(self)
         self.entity_description = description
-        ReolinkEntity.__init__(self, coordinator)
+        super().__init__(api)
         self._attr_supported_features = description.features
         self._attr_extra_state_attributes = {
             "output_type": description.output_type.name,
@@ -345,31 +340,19 @@ class ReolinkCamera(ReolinkEntity, Camera):
         self._port_disabled_warn = False
 
     async def stream_source(self) -> str | None:
-        client = self._entry_data["client"]
+        if not (client := self._client):
+            return await super().stream_source()
         if self.entity_description.output_type == OutputStreamTypes.RTSP:
-            try:
-                url = await client.get_rtsp_url(
-                    self._channel_id, self.entity_description.stream_type
-                )
-            except Exception:
-                self.hass.create_task(self.coordinator.async_request_refresh())
-                raise
-
+            url = await client.get_rtsp_url(self._channel_id, self.entity_description.stream_type)
             # rtsp uses separate auth handlers so we have to "inject" the auth with http basic
-            data = self.coordinator.config_entry.data
+            data = self.hass.config_entries.async_get_entry(self._entry_id).data
             auth = quote(data.get(CONF_USERNAME, DEFAULT_USERNAME))
             auth += ":"
             auth += quote(data.get(CONF_PASSWORD, DEFAULT_PASSWORD))
             idx = url.index("://")
             url = f"{url[:idx+3]}{auth}@{url[idx+3:]}"
         elif self.entity_description.output_type == OutputStreamTypes.RTMP:
-            try:
-                url = await client.get_rtmp_url(
-                    self._channel_id, self.entity_description.stream_type
-                )
-            except Exception:
-                self.hass.create_task(self.coordinator.async_request_refresh())
-                raise
+            url = await client.get_rtmp_url(self._channel_id, self.entity_description.stream_type)
         else:
             return await super().stream_source()
         return url
@@ -393,60 +376,69 @@ class ReolinkCamera(ReolinkEntity, Camera):
         return await super()._async_use_rtsp_to_webrtc()
 
     async def _async_camera_image(self):
-        client = self._entry_data["client"]
+        if not (client := self._client):
+            return None
         try:
             image = await client.get_snap(self._channel_id)
         except ReolinkResponseError as resperr:
-            _LOGGER.exception(
-                "Failed to capture snapshot (%s: %s)", resperr.code, resperr.details
-            )
+            _LOGGER.exception("Failed to capture snapshot (%s: %s)", resperr.code, resperr.details)
             image = None
         except Exception:  # pylint: disable=broad-except
             _LOGGER.exception("Failed to capture snapshot")
             image = None
         if image is None:
+            domain_data: DomainDataType = self.hass.data[DOMAIN]
             # have the coordinator upate on error so we can reconnect or disable
-            self.hass.create_task(self.coordinator.async_request_refresh())
+            self.hass.create_task(
+                domain_data[self._entry_id][DATA_COORDINATOR].async_request_refresh()
+            )
         self._snapshot_task = None
         return image
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
     ) -> bytes | None:
-        _capabilities = self._entry_data["client_data"].capabilities.channels[
-            self._channel_id
-        ]
-        if not _capabilities.snap:
+        if (
+            not (client_data := self._device_data)
+            or not client_data.capabilities.channels[self._channel_id].snap
+        ):
             return await super().async_camera_image(width, height)
 
         # throttle calls to one per channel at a time
         if not self._snapshot_task:
-            self._snapshot_task = self.hass.async_create_task(
-                self._async_camera_image()
-            )
+            self._snapshot_task = self.hass.async_create_task(self._async_camera_image())
 
         return await self._snapshot_task
 
-    @property
-    def available(self) -> bool:
-        if not self._attr_available:
-            return False
-        return super().available
+    # def _handle_coordinator_update(self) -> None:
+    #     if api := self._device_data:
+    #         if self.entity_description.output_type == OutputStreamTypes.RTSP:
+    #             self._attr_available = api.ports.rtsp.enabled
+    #         elif self.entity_description.output_type == OutputStreamTypes.RTMP:
+    #             self._attr_available = api.ports.rtmp.enabled
+    #         if not self._attr_available and not self._port_disabled_warn:
+    #             self._port_disabled_warn = True
+    #             self.coordinator.logger.error(
+    #                 "(%s) is disabled on device (%s) so (%s) stream will be unavailable",
+    #                 self.entity_description.output_type.name,
+    #                 self._attr_device_info.get("name", self._attr_device_info.get("default_name")),
+    #                 self.entity_description.stream_type.name,
+    #             )
+    #     else:
+    #         self._attr_available = False
 
-    def _handle_coordinator_update(self) -> None:
-        api = self._client_data
+    #     return super()._handle_coordinator_update()
 
-        if self.entity_description.output_type == OutputStreamTypes.RTSP:
-            self._attr_available = api.ports.rtsp.enabled
-        elif self.entity_description.output_type == OutputStreamTypes.RTMP:
-            self._attr_available = api.ports.rtmp.enabled
-        if not self._attr_available and not self._port_disabled_warn:
-            self._port_disabled_warn = True
-            self.coordinator.logger.error(
-                "(%s) is disabled on device (%s) so (%s) stream will be unavailable",
-                self.entity_description.output_type.name,
-                api.device_entry.name_by_user or api.device_entry.name,
-                self.entity_description.stream_type.name,
-            )
+    async def async_added_to_hass(self) -> None:
+        signal = f"{DOMAIN}_{self._entry_id}_ch_{self._channel_id}_motion"
 
-        return super()._handle_coordinator_update()
+        def on_motion(sensor: BinarySensorEntity):
+            self._attr_is_recording = sensor.is_on
+            self.schedule_update_ha_state()
+
+        channel = self._device_data.capabilities.channels[self._channel_id]
+        if channel.alarm.motion or channel.supports.motion_detection:
+            self._attr_motion_detection_enabled = True
+            dispatcher: helper_dispatcher = self.hass.helpers.dispatcher
+            self.async_on_remove(hass_bound(dispatcher.async_dispatcher_connect)(signal, on_motion))
+        return await super().async_added_to_hass()

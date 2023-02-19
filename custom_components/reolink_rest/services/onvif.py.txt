@@ -1,5 +1,4 @@
-"""Simple ONVIF Implementation"""
-
+"""ReoLink ONVIF client"""
 
 from asyncio import TimerHandle
 import base64
@@ -10,24 +9,30 @@ import hashlib
 import logging
 import secrets
 from types import MappingProxyType
-from typing import Final
-from xml.etree import ElementTree as et
-
+from typing import TYPE_CHECKING, Final
 from aiohttp import ClientSession, TCPConnector, client_exceptions
-
 from homeassistant.core import HomeAssistant, callback, async_get_hass
+from homeassistant.loader import bind_hass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.singleton import singleton
 from homeassistant.util import dt
 
+if TYPE_CHECKING:
+    from homeassistant.helpers import storage
+    from homeassistant.components import webhook
+
+from xml.etree import ElementTree as et
+
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
 from async_reolink.api.const import DEFAULT_USERNAME, DEFAULT_PASSWORD
 
-from .api import EntryData, async_get_entry_data
+from .._utilities.hass_typing import hass_bound
 
-from .const import DOMAIN
+from ..api import EntryData, async_get_entry_data
+
+from ..const import DOMAIN
 
 STORE_VERSION: Final = 1
 
@@ -36,12 +41,8 @@ _LOGGER = logging.getLogger(__name__)
 SOAP_ENV: Final = "http://www.w3.org/2003/05/soap-envelope"
 WSNT: Final = "http://docs.oasis-open.org/wsn/b-2"
 WSA: Final = "http://www.w3.org/2005/08/addressing"
-WSSE: Final = (
-    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
-)
-WSU: Final = (
-    "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
-)
+WSSE: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+WSU: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 TT: Final = "http://www.onvif.org/ver10/schema"
 
 
@@ -78,9 +79,7 @@ def _create_wsse(*, username: str, password: str):
             "Type": "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest"
         },
     ).text = base64.b64encode(digest.digest()).decode("utf-8")
-    et.SubElement(_token, _ns("Nonce", WSSE)).text = base64.b64encode(nonce).decode(
-        "utf-8"
-    )
+    et.SubElement(_token, _ns("Nonce", WSSE)).text = base64.b64encode(nonce).decode("utf-8")
     et.SubElement(_token, _ns("Created", WSU)).text = created
 
     return wsse
@@ -124,9 +123,9 @@ def _create_subscribe(
         _ns("Address", WSA),
     ).text = address
     if expires is not None:
-        et.SubElement(
-            subscribe, _ns("InitialTerminationTime", WSNT)
-        ).text = _duration_isoformat(expires)
+        et.SubElement(subscribe, _ns("InitialTerminationTime", WSNT)).text = _duration_isoformat(
+            expires
+        )
     return (
         "http://docs.oasis-open.org/wsn/bw-2/NotificationProducer/SubscribeRequest",
         [],
@@ -135,14 +134,10 @@ def _create_subscribe(
 
 
 def _create_renew(manager: str, new_expires: timedelta = None):
-    _ACTION: Final = (
-        "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest"
-    )
+    _ACTION: Final = "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/RenewRequest"
     renew = et.Element(_ns("Renew", WSNT))
     if new_expires is not None:
-        et.SubElement(renew, _ns("TerminationTime", WSNT)).text = _duration_isoformat(
-            new_expires
-        )
+        et.SubElement(renew, _ns("TerminationTime", WSNT)).text = _duration_isoformat(new_expires)
 
     headers = [et.Element(_ns("Action", WSA))]
     headers[0].text = _ACTION
@@ -152,9 +147,7 @@ def _create_renew(manager: str, new_expires: timedelta = None):
 
 
 def _create_unsubscribe(manager: str):
-    _ACTION: Final = (
-        "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest"
-    )
+    _ACTION: Final = "http://docs.oasis-open.org/wsn/bw-2/SubscriptionManager/UnsubscribeRequest"
     unsubscribe = et.Element(_ns("Unsubscribe", WSNT))
 
     headers = [et.Element(_ns("Action", WSA))]
@@ -169,7 +162,7 @@ EVENT_SERVICE: Final = "/onvif/event_service"
 DEFAULT_EXPIRES: Final = timedelta(hours=1)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, slots=True)
 class Subscription:
     """Push Subscription Token"""
 
@@ -189,9 +182,7 @@ async def _send(url: str, headers: dict[str, str], data):
         _LOGGER.debug("%s->%r", url, data)
 
         headers.setdefault("content-type", "application/soap+xml;charset=UTF-8")
-        async with client.post(
-            url, data=data, headers=headers, allow_redirects=False
-        ) as response:
+        async with client.post(url, data=data, headers=headers, allow_redirects=False) as response:
             if "xml" not in response.content_type:
                 _LOGGER.warning("bad response")
                 return None
@@ -202,7 +193,11 @@ async def _send(url: str, headers: dict[str, str], data):
 
 
 def _get_onvif_base(entry_data: EntryData):
-    if not entry_data["client_data"].ports.onvif.enabled:
+
+    if (
+        entry_data["client_data"].capabilities.supports.onvif_enable
+        and not entry_data["client_data"].ports.onvif.enabled
+    ):
         return None
     return f"http://{entry_data['client'].hostname}:{entry_data['client_data'].ports.onvif.value}"
 
@@ -308,9 +303,7 @@ def _expires(sub: Subscription, entry_data: EntryData):
     return expires - now
 
 
-async def _unsubscribe(
-    sub: Subscription, config_entry: ConfigEntry, entry_data: EntryData
-):
+async def _unsubscribe(sub: Subscription, config_entry: ConfigEntry, entry_data: EntryData):
     if sub is None:
         return
 
@@ -400,6 +393,7 @@ async def _renew(
 
 @singleton(f"{DOMAIN}-onvif-store")
 @callback
+@bind_hass
 def _get_store(hass: HomeAssistant):
     return Store(hass, STORE_VERSION, f"{DOMAIN}_onvif", True)
 
@@ -413,17 +407,18 @@ def _fix_expires(data: dict):
 _ScheduledSubscriptions = deque[tuple[str, Subscription]]
 
 
-async def _async_run_next_renewal(
-    entry_id: str, sub: Subscription, hass: HomeAssistant
-):
+async def _async_run_next_renewal(entry_id: str, sub: Subscription, hass: HomeAssistant):
+    entry_data = async_get_entry_data(hass, entry_id, False)
     result = await _renew(
         sub,
         hass.config_entries.async_get_entry(entry_id),
-        async_get_entry_data(hass, entry_id, False),
+        entry_data,
     )
     if isinstance(result, Subscription):
         _schedule_renewal(entry_id, result, hass)
         return
+    elif (handler := entry_data.get("onvif_error")) and callable(handler):
+        hass.async_add_executor_job(handler, result)
     _schedule_next_renewal(_get_renewal_queue(hass), hass)
 
 
@@ -438,12 +433,10 @@ def _run_next_renewal(subs: _ScheduledSubscriptions, hass: HomeAssistant | None 
 
 def _get_renewal_queue(hass: HomeAssistant) -> _ScheduledSubscriptions:
     domain_data: dict = hass.data[DOMAIN]
-    return domain_data.setdefault("onviv_renewals", deque())
+    return domain_data.setdefault("onvif_renewals", deque())
 
 
-def _schedule_next_renewal(
-    subs: _ScheduledSubscriptions, hass: HomeAssistant | None = None
-):
+def _schedule_next_renewal(subs: _ScheduledSubscriptions, hass: HomeAssistant | None = None):
     if len(subs) == 0:
         return
     entry_id, sub = next(iter(subs))
@@ -456,14 +449,12 @@ def _schedule_next_renewal(
         # this should NEVER happen
         raise SystemError()
 
-    delay = min(ttl.total_seconds() - 10, 0)
+    delay = max(ttl.total_seconds() - 10, 0)
     # shave off some seconds for safety
     domain_data["onvif_timer"] = hass.loop.call_later(delay, _run_next_renewal, subs)
 
 
-def _schedule_renewal(
-    entry_id: str, sub: Subscription, hass: HomeAssistant | None = None
-):
+def _schedule_renewal(entry_id: str, sub: Subscription, hass: HomeAssistant | None = None):
     if not sub.expires:
         return
     if hass is None:
@@ -488,7 +479,8 @@ def _schedule_renewal(
     _schedule_next_renewal(subs, hass)
 
 
-async def async_get_subscription(url: str, hass: HomeAssistant, entry_id: str):
+@bind_hass
+async def async_get_subscription(hass: HomeAssistant, url: str, entry_id: str):
     """Get existing or new ONVIF subscription"""
 
     config_entry = hass.config_entries.async_get_entry(entry_id)
@@ -517,6 +509,7 @@ async def async_get_subscription(url: str, hass: HomeAssistant, entry_id: str):
     return sub
 
 
+@callback
 def async_parse_notification(text: str):
     """Push Motion Event Handler"""
 

@@ -1,25 +1,17 @@
 """Reolink Entities"""
 
-from dataclasses import dataclass, replace
-from typing import Callable, Generic, Protocol, TypeVar
-from typing_extensions import Self
-from homeassistant.helpers.entity import DeviceInfo, EntityDescription
+import dataclasses
+from homeassistant.config_entries import current_entry
+from homeassistant.helpers.entity import Entity, EntityDescription
 
-from homeassistant.helpers.update_coordinator import (
-    DataUpdateCoordinator,
-    CoordinatorEntity,
-)
+from homeassistant.backports.enum import StrEnum
 
-from async_reolink.api.system.capabilities import Capabilities, ChannelCapabilities
+from ._utilities.object import setdefaultattr
 
-from ._utilities.bind import bind
+from .typing import ChannelData, EntryId
 
 from .api import (
-    ChannelData,
-    ClientData,
-    QueueResponse,
-    RequestQueue,
-    async_get_entry_data,
+    ReolinkDeviceApi,
 )
 
 # def _get_channels(
@@ -651,202 +643,86 @@ from .api import (
 #             self.client = None
 
 
-class EntityServiceCall(Protocol):
-    """Entity Serivce Call"""
-
-    def __call__(self, entity: CoordinatorEntity, **kwds: any) -> any:
-        ...
-
-
-class DeviceSupportedCallback(Protocol):
-    """Device Supported"""
-
-    def __call__(
-        self, capabilities: Capabilities, client_data: ClientData = None
-    ) -> Self | None:
-        ...
-
-
-@dataclass
-class DeviceSupportedMixin:
-    """Mixin for device support"""
-
-    @staticmethod
-    def simple_test(test: Callable[[Capabilities], bool]):
-        """Create simple test for device_supported_fn"""
-
-        def callback(
-            self: Self, capabilities: Capabilities, _: ClientData | None
-        ) -> Self | None:
-            if test(capabilities):
-                return self
-
-        return callback
-
-    @staticmethod
-    def simple_test2(test: Callable[[Capabilities, ClientData], bool]):
-        """Create simple test for device_supported_fn"""
-
-        def callback(
-            self: Self, capabilities: Capabilities, client_data: ClientData | None
-        ) -> Self | None:
-            if test(capabilities, client_data):
-                return self
-
-        return callback
-
-    device_supported_fn: Callable[
-        [Self, Capabilities, ClientData | None], Self | None
-    ] = None
-
-
-@dataclass
-class ChannelSupportedMixin:
-    """Mixin for channel support testing"""
-
-    @staticmethod
-    def simple_test(test: Callable[[ChannelCapabilities], bool]):
-        """Create simple test for channel_supported_fn"""
-
-        def callback(
-            self: Self,
-            capabilities: ChannelCapabilities,
-            _: ChannelData | None,
-        ) -> Self | None:
-            if test(capabilities):
-                return self
-
-        return callback
-
-    @staticmethod
-    def simple_test2(test: Callable[[ChannelCapabilities, ChannelData], bool]):
-        """Create simple test for channel_supported_fn"""
-
-        def callback(
-            self: Self,
-            capabilities: ChannelCapabilities,
-            channel_data: ChannelData | None,
-        ) -> Self | None:
-            if test(capabilities, channel_data):
-                return self
-
-        return callback
-
-    channel_supported_fn: Callable[
-        [Self, ChannelCapabilities, ChannelData | None], Self | None
-    ] = None
-
-
-@dataclass
-class ChannelMixin(ChannelSupportedMixin):
+@dataclasses.dataclass
+class ChannelDescriptionMixin:
     """Mixin for required keys"""
-
-    @staticmethod
-    def set_channel(description: Self, channel_data: ChannelData):
-        """Set channel"""
-        if not isinstance(description, EntityDescription):
-            return description
-        return replace(
-            description,
-            channel_id=channel_data.channel_id,
-            key=f"ch_{channel_data.channel_id}_{description.key}",
-        )
-
-    @classmethod
-    def simple_test_and_set(cls, test: Callable[[ChannelCapabilities], bool]):
-        """Create simple test for channel_supported_fn"""
-
-        def callback(
-            self: Self,
-            capabilities: ChannelCapabilities,
-            channel_data: ChannelData | None,
-        ) -> Self | None:
-            if not test(capabilities):
-                return None
-            return cls.set_channel(self, channel_data)
-
-        return callback
 
     channel_id: int = 0
 
-
-@dataclass
-class RequestQueueMixin:
-    """Mixin for required keys"""
-
-    queue_fn: Callable[["ReolinkEntity", RequestQueue], None] = None
-
-
-@dataclass
-class DataUpdateHandlerMixin:
-    """Mixin for required keys"""
-
-    data_handler_fn: Callable[["ReolinkEntity"], None] = None
-
-
-T = TypeVar("T")  # pylint: disable=invalid-name
-
-
-class ReolinkEntity(CoordinatorEntity[DataUpdateCoordinator[T]], Generic[T]):
-    """Reolink Entity"""
-
-    _channel_id: int = None
-
-    def __init__(
-        self, coordinator: DataUpdateCoordinator[T], context: any = None
-    ) -> None:
-        super().__init__(coordinator, context)
-        if hasattr(self, "entity_description"):
-            description = self.entity_description
-        else:
-            description = None
-        if client_data := self._client_data:
-            if client_data.device_info.channels == 1:
-                self._attr_device_info = client_data.channel_info[0].device
-            elif device := client_data.device_entry:
-                self._attr_device_info = DeviceInfo(
-                    identifiers=device.identifiers.copy(),
-                    connections=device.connections.copy(),
-                )
-            if (
-                isinstance(description, ChannelMixin)
-                and (channel_id := description.channel_id) is not None
-            ):
-                self._channel_id = channel_id
-                self._attr_device_info = client_data.channel_info[channel_id].device
-                self._attr_extra_state_attributes = {"channel": channel_id}
-            if description and description.key:
-                self._attr_unique_id = coordinator.config_entry.unique_id
-                if self._attr_unique_id is not None:
-                    self._attr_unique_id += f"_{self.entity_description.key}"
-        if (
-            isinstance(description, RequestQueueMixin)
-            and (handler := description.queue_fn)
-            and isinstance(context, RequestQueue)
-        ):
-            handler(self, context)
-
-        if isinstance(description, DataUpdateHandlerMixin) and (
-            data_handler := description.data_handler_fn
-        ):
-            self._handle_entity_data = bind(self, data_handler)
-        else:
-            self._handle_entity_data = None
-
-    @property
-    def _entry_data(self):
-        return async_get_entry_data(
-            self.coordinator.hass, self.coordinator.config_entry.entry_id, False
+    def from_channel(self, channel_data: ChannelData):
+        """Create a new instance from merging channel data"""
+        return dataclasses.replace(
+            self,
+            channel_id=channel_data.channel_id,
+            key=f"ch_{channel_data.channel_id}_{self.key}",
         )
 
+
+# _T = TypeVar("_T", infer_variance=True)
+# _TContext = TypeVar("_TContext", infer_variance=True)  # plint: disable=invalid-name
+
+
+class UpdateMethods(StrEnum):
+    """Update Method"""
+
+    POLL = "polling"
+    PUSH = "push"
+    PUSH_POLL = "push/poll"
+    INPUT = "input"
+    INPUT_POLL = "input/poll"
+
+
+class ReolinkEntity(Entity):
+    """Reolink Entity"""
+
+    _attr_channel_id: int
+    _attr_update_method: UpdateMethods
+
+    def __init__(self, api: ReolinkDeviceApi, unique_id: str | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        config_entry = current_entry.get()
+        self._entry_id = config_entry.entry_id
+        if not unique_id:
+            unique_id = config_entry.unique_id
+        self._api = api
+        device_data = api.data
+        self._attr_device_info = api.async_get_device_lookup_info(unique_id or self._entry_id)
+        if not (description := getattr(self, "entity_description", None)) or not isinstance(
+            description, EntityDescription
+        ):
+            description = None
+        if (
+            isinstance(
+                description,
+                ChannelDescriptionMixin,
+            )
+            and (channel_id := description.channel_id) is not None
+        ):
+            self._attr_channel_id = channel_id
+            self._attr_device_info = device_data.channel_info[channel_id].device
+            setdefaultattr(self, "_attr_extra_state_attributes", {})["channel"] = channel_id
+        if description and description.key and unique_id:
+            self._attr_unique_id = f"{unique_id}_{description.key}"
+
     @property
-    def _client_data(self):
-        return self._entry_data.get("client_data", None)
+    def _client(self):
+        return self._api.client
 
-    def _handle_coordinator_update(self) -> None:
-        if self._handle_entity_data:
-            self._handle_entity_data()
-        return super()._handle_coordinator_update()
+    @property
+    def _device_data(self):
+        return self._api.data
 
+    @property
+    def _channel_id(self) -> int:
+        return getattr(self, "_attr_channel_id", 0)
 
-ReolinkEntityWithQueue = ReolinkEntity[QueueResponse]
+    @property
+    def _update_method(self) -> UpdateMethods:
+        return getattr(self, "_attr_update_method", UpdateMethods.POLL)
+
+    @_update_method.setter
+    def _update_method(self, value):
+        if not value:
+            raise ValueError("value must be provided")
+        self._attr_update_method = UpdateMethods(value)
+        self._attr_extra_state_attributes["update_method"] = self._attr_update_method

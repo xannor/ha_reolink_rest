@@ -1,58 +1,44 @@
 """Reolink Light Platform"""
 
+import dataclasses
 import logging
-from typing import Final
-
+from typing import MutableSequence, Protocol
+from typing_extensions import TypeVar, Self
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from homeassistant.components.light import LightEntity
+from homeassistant.components.light import (
+    LightEntity,
+)
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, CoordinatorEntity
 
-from ._utilities.bind import bind
+from .const import DATA_API, DATA_COORDINATOR, DOMAIN, OPT_CHANNELS
 
-from .const import OPT_CHANNELS
 
-from .api import QueueResponse, RequestQueue, async_get_entry_data
+from .typing import (
+    DomainDataType,
+    RequestType,
+    ResponseCoordinatorType,
+    AsyncEntityInitializedCallback,
+    EntityServiceCallback,
+)
+
+from .light_typing import LightEntityDescription
+
+from .api import ReolinkDeviceApi
 
 from .entity import (
+    ChannelDescriptionMixin,
     ReolinkEntity,
 )
 
-from .lights.model import ReolinkLightEntityDescription
-from .lights.floodlight import LIGHTS as FLOODLIGHTS
+from ._utilities.typing import bind
 
+from .setups import floodlight
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class ReolinkLightEntity(ReolinkEntity[QueueResponse], LightEntity):
-    """Reolink Light Entity"""
-
-    coordinator_context: RequestQueue
-    _attr_brightness_max: int = 255
-
-    def __init__(
-        self,
-        coordinator: DataUpdateCoordinator[QueueResponse],
-        description: ReolinkLightEntityDescription,
-    ) -> None:
-        LightEntity.__init__(self)
-        self.entity_description = description
-        ReolinkEntity.__init__(self, coordinator, RequestQueue())
-        self._turn_on = bind(self, description.on_call)
-        self._turn_off = bind(self, description.off_call)
-
-    async def async_turn_on(self, **kwargs: any) -> None:
-        return await self._turn_on(**kwargs)
-
-    async def async_turn_off(self, **kwargs: any) -> None:
-        return await self._turn_off(**kwargs)
-
-
-LIGHTS: Final = FLOODLIGHTS
 
 
 async def async_setup_entry(
@@ -66,35 +52,44 @@ async def async_setup_entry(
 
     entities: list[LightEntity] = []
 
-    entry_data = async_get_entry_data(hass, config_entry.entry_id, False)
-    config_entry = hass.config_entries.async_get_entry(config_entry.entry_id)
-    api = entry_data["client_data"]
+    domain_data: DomainDataType = hass.data[DOMAIN]
+    entry_data = domain_data[config_entry.entry_id]
 
-    _capabilities = api.capabilities
+    api = entry_data[DATA_API]
+    device_data = api.data
+
+    _capabilities = device_data.capabilities
 
     channels: list[int] = config_entry.options.get(OPT_CHANNELS, None)
-    for status in api.channel_statuses.values():
-        if not status.online or (
-            channels is not None and not status.channel_id in channels
-        ):
+    for status in device_data.channel_statuses.values():
+        if not status.online or (channels is not None and not status.channel_id in channels):
             continue
         channel_capabilities = _capabilities.channels[status.channel_id]
-        info = api.channel_info[status.channel_id]
+        info = device_data.channel_info[status.channel_id]
 
-        for light in LIGHTS:
-            description = light
-            if (device_supported := description.device_supported_fn) and not (
-                description := device_supported(description, _capabilities, api)
+        for light in floodlight.LIGHTS:
+            description = light.description
+            if (device_supported := light.device_supported) and not device_supported(
+                description, _capabilities, device_data
             ):
                 continue
-            if (channel_supported := description.channel_supported_fn) and not (
-                description := channel_supported(
-                    description, channel_capabilities, info
+            if channel_supported := light.channel_supported:
+                # pylint: disable=not-callable
+                if not channel_supported(description, channel_capabilities, info):
+                    continue
+                if isinstance(description, ChannelDescriptionMixin):
+                    description = description.from_channel(info)
+
+            entities.append(
+                ReolinkLightEntity(
+                    api,
+                    entry_data[DATA_COORDINATOR],
+                    description,
+                    light.on_call,
+                    light.off_call,
+                    light.init_handler,
                 )
-            ):
-                continue
-
-            entities.append(ReolinkLightEntity(entry_data["coordinator"], description))
+            )
 
     if entities:
         async_add_entities(entities)
@@ -106,3 +101,43 @@ async def async_setup_entry(
 #     """Unload Light Entities"""
 
 #     return True
+
+
+class ReolinkLightEntity(ReolinkEntity, CoordinatorEntity[ResponseCoordinatorType], LightEntity):
+    """Reolink Light Entity"""
+
+    entity_description: LightEntityDescription
+    coordinator_context: MutableSequence[RequestType] | None
+
+    def __init__(
+        self,
+        api: ReolinkDeviceApi,
+        coordinator: DataUpdateCoordinator[ResponseCoordinatorType],
+        description: LightEntityDescription,
+        on_call: EntityServiceCallback["ReolinkLightEntity"],
+        off_call: EntityServiceCallback["ReolinkLightEntity"],
+        init_handler: AsyncEntityInitializedCallback["ReolinkLightEntity"] = None,
+    ) -> None:
+        self.entity_description = description
+        super().__init__(api, coordinator.config_entry.unique_id, coordinator=coordinator)
+        self._on_call = bind(on_call, self)
+        self._off_call = bind(off_call, self)
+        self._init_handler = bind(init_handler, self)
+
+    def turn_off(self, **kwargs: any):
+        self.hass.create_task(self.async_turn_off(**kwargs))
+
+    def turn_on(self, **kwargs: any):
+        self.hass.create_task(self.async_turn_on(**kwargs))
+
+    async def async_turn_on(self, **kwargs: any):
+        await self._on_call(**kwargs)
+
+    async def async_turn_off(self, **kwargs: any):
+        await self._off_call(**kwargs)
+
+    async def async_added_to_hass(self):
+        """update"""
+        if self._init_handler:
+            await self._init_handler()
+        return await super().async_added_to_hass()

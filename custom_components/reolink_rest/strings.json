@@ -26,6 +26,9 @@
         "data": {
           "prefix_channel": "Channel Prefix",
           "channels": "Channels"
+        },
+        "data_description": {
+          "channels": "Leave blank for all available channels."
         }
       }
     },
@@ -65,6 +68,9 @@
         "data": {
           "prefix_channel": "Channel Prefix",
           "channels": "Channels"
+        },
+        "data_description": {
+          "channels": "Leave blank for all available channels."
         }
       }
     }

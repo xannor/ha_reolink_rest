@@ -17,7 +17,6 @@ DEFAULT_SCAN_INTERVAL: Final = 10
 DEFAULT_HISPEED_INTERVAL: Final = 2
 
 CONF_USE_HTTPS: Final = "use_https"
-OPT_DISCOVERY: Final = "discovery"
 OPT_CHANNELS: Final = "channels"
 OPT_PREFIX_CHANNEL: Final = "prefix_channel"
 OPT_HISPEED_INTERVAL: Final = "hispeed_interval"
@@ -33,4 +32,8 @@ class SSLMode(StrEnum):
     INSECURE = "insecure"
 
 
+DATA_API: Final = "api"
+DATA_COORDINATOR: Final = "coordinator"
+DATA_HISPEED_COORDINDATOR: Final = "hispeed_coordinator"
 DATA_ONVIF: Final = "onvif"
+DATA_WEBHOOK: Final = "webhook"
