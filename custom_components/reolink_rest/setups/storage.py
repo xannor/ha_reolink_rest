@@ -28,7 +28,7 @@ _ICONS: Final = MappingProxyType(
 
 
 @dataclasses.dataclass
-class ReolinkStorageSensorEntityDescription(SensorEntityDescription):
+class StorageSensorEntityDescription(SensorEntityDescription):
     """Reolink Storage Sensor Entity Description"""
 
     storage_id: int = 0
@@ -52,7 +52,7 @@ async def _capacity_init(self: SensorEntity):
     if not isinstance(self, ReolinkEntity):
         raise ValueError()
 
-    description: ReolinkStorageSensorEntityDescription = self.entity_description
+    description: StorageSensorEntityDescription = self.entity_description
 
     def data_handler(response: system_command.GetHddInfoResponse):
         data = response.info[description.storage_id]
@@ -66,7 +66,7 @@ async def _capacity_init(self: SensorEntity):
 
 
 _CAPACITY: Final = SensorEntityConfig.create(
-    ReolinkStorageSensorEntityDescription(
+    StorageSensorEntityDescription(
         "storage_capacity",
         name="Capacity",
         state_class=SensorStateClass.TOTAL,
@@ -83,7 +83,7 @@ async def _remaining_init(self: SensorEntity):
 
     description = self.entity_description
     if TYPE_CHECKING:
-        description = cast(ReolinkStorageSensorEntityDescription, description)
+        description = cast(StorageSensorEntityDescription, description)
 
     def data_handler(response: system_command.GetHddInfoResponse):
         data = response.info[description.storage_id]
@@ -99,7 +99,7 @@ async def _remaining_init(self: SensorEntity):
 _SENSORS: Final = (
     _CAPACITY,
     SensorEntityConfig.create(
-        ReolinkStorageSensorEntityDescription("storage_remaining", name="Remaining"),
+        StorageSensorEntityDescription("storage_remaining", name="Remaining"),
         _CAPACITY.device_supported,
         init_handler=_remaining_init,
     ),

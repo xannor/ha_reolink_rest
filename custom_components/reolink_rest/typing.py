@@ -3,9 +3,9 @@
 from abc import ABC
 import dataclasses
 from datetime import timedelta
-from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
+    Awaitable,
     Callable,
     Coroutine,
     Final,
@@ -16,7 +16,7 @@ from typing import (
     TypeGuard,
     TypedDict,
 )
-from typing_extensions import TypeVar, TypeAlias, Self, NotRequired
+from typing_extensions import TypeVar, TypeAlias, Self, NotRequired, ParamSpec
 
 from homeassistant.helpers.entity import DeviceInfo, EntityDescription, Entity
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, CoordinatorEntity
@@ -91,8 +91,16 @@ class DeviceData(Protocol):
     time_diff: timedelta
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+AsyncCallable = Callable[_P, Coroutine[any, any, _R]]
+# class AsyncCallable(Generic[_P, _R], Protocol):
+#     async def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+#         ...
+
 ResponseHandlerType = Callable[[Response], None]
-AsyncResponseHandlerType = Callable[[Response], Coroutine[any, any, None]]
+AsyncResponseHandlerType = AsyncCallable[[Response], None]
 
 
 class RequestHandler(NamedTuple):
@@ -188,14 +196,9 @@ class ChannelEntityConfig(DeviceEntityConfig[_DT]):
 
 _TE = TypeVar("_TE", bound=Entity, infer_variance=True, default=Entity)
 
-AsyncEntityInitializedCallback: TypeAlias = Callable[
-    [
-        _TE,
-    ],
-    Coroutine[any, any, None],
-]
+AsyncEntityInitializedCallback = AsyncCallable[[_TE], None]
 
-EntityDataHandlerCallback: TypeAlias = Callable[[_TE], None]
+EntityDataHandlerCallback = Callable[[_TE], None]
 
 
 class EntityServiceCallback(Protocol[_TE]):

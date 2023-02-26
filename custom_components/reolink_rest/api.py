@@ -246,7 +246,7 @@ class ReolinkDeviceApi:
             return self._client.hostname
         return name or ""
 
-    async def async_ensure_connection(self, hass: HomeAssistant, **config_args: any):
+    async def async_ensure_connection(self, **config_args: any):
         if not self.has_client:
             self._client = self._create_Client(**config_args)
         client = self.client
@@ -510,7 +510,7 @@ class ReolinkDeviceApi:
                 self._channel_statuses[0] = SimpleNamespace(
                     channel_id=0, name=None, online=True, type=dev_info.type
                 )
-                self._channel_info = _ChannelInfo(channel_id=0, device=device)
+                self._channel_info[0] = _ChannelInfo(channel_id=0, device=device)
             elif dev_info.channels > 1:
                 entry = add_or_update_device_entry(device)
                 name = entry.name or name
@@ -554,7 +554,7 @@ class ReolinkDeviceApi:
         unique_id: str | None,
         **config_args: any,
     ):
-        await self.async_ensure_connection(hass, **config_args)
+        await self.async_ensure_connection(**config_args)
         requests: list[RequestType] = []
         ok = True
 

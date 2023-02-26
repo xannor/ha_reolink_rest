@@ -1,7 +1,7 @@
 """Webhook Service"""
 
 import logging
-from typing import TYPE_CHECKING, Callable, Coroutine, NamedTuple
+from typing import TYPE_CHECKING, Callable, Coroutine, NamedTuple, cast
 
 from aiohttp.web import Request, Response
 
@@ -18,6 +18,7 @@ from homeassistant.core import (
     is_callback,
     HomeAssistantError,
     HassJob,
+    HassJobType,
     CALLBACK_TYPE,
 )
 from homeassistant.loader import bind_hass
@@ -101,7 +102,7 @@ class WebHookService:
     def async_listen(
         self,
         entry_id: EntryId,
-        listener: Callable[[Request], Coroutine[any, any, None] | None],
+        listener: Callable[[Request], Coroutine[any, any, Response | None] | Response | None],
         request_filter: Callable[[Request], bool] | None = None,
         run_immediately: bool = False,
         /,
@@ -160,7 +161,7 @@ class WebHookService:
         if not (listeners := self._listeners.get(webhook_id)):
             return
 
-        for job, request_filter, run_immediately in listeners:
+        for job, request_filter, _ in listeners:
             if request_filter is not None:
                 try:
                     if not request_filter(request):
@@ -168,19 +169,24 @@ class WebHookService:
                 except Exception:  # pylint: disable=broad-except
                     _LOGGER.exception("Error in request filter")
                     continue
-            if run_immediately:
-                try:
-                    response = job.target(request)
-                except Exception:  # pylint: disable=broad-except
-                    _LOGGER.exception("Error running job: %s", job)
-                    continue
-            else:
-                response = self._hass.async_add_hass_job(job, request)
+            match job.job_type:
+                case HassJobType.Coroutinefunction:
+                    if TYPE_CHECKING:
+                        job.target = cast(
+                            Callable[[Request], Coroutine[any, any, Response | None]], job.target
+                        )
+                    response = await job.target(request)
+                case _:
+                    try:
+                        if TYPE_CHECKING:
+                            job.target = cast(Callable[[Request], Response | None], job.target)
+                        response = job.target(request)
+                    except Exception:  # pylint: disable=broad-except
+                        _LOGGER.exception("Error running job: %s", job)
+                        continue
 
-            if isinstance(response, Response):
+            if response is not None:
                 return response
-            elif response is not None:
-                return await response
 
 
 @callback

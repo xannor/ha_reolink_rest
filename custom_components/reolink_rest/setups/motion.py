@@ -1,8 +1,8 @@
 """Motion Entities"""
 
-from asyncio import Task
+from asyncio import Task, TimerHandle
 import dataclasses
-from typing import TYPE_CHECKING, Callable, Final, Protocol
+from typing import TYPE_CHECKING, Callable, Final, Protocol, cast, is_typeddict
 
 
 from homeassistant.core import CALLBACK_TYPE, Event, callback
@@ -11,9 +11,9 @@ from homeassistant.components.binary_sensor import (
     BinarySensorDeviceClass,
 )
 
-from .motion_typing import ChannelMotionEventData, MotionEvent, MotionEventData
+from .motion_typing import ChannelMotionEventData, MotionEvent, MotionEventData, MotionEventType
 
-from ..typing import DomainDataType, RequestHandler
+from ..typing import DeviceData, DomainDataType, RequestHandler
 
 if TYPE_CHECKING:
     from homeassistant.helpers import dispatcher as dispatcher_helper
@@ -28,7 +28,6 @@ from async_reolink.rest.ai import command as ai_command
 from async_reolink.rest.alarm import command as alarm_command
 
 from .._utilities.object import lazysetdefaultattr, setdefaultattr
-from .._utilities.typeguards import is_type
 from .._utilities.hass_typing import hass_bound
 
 from ..api import ChannelData
@@ -44,7 +43,7 @@ from ..binary_sensor_typing import (
 
 
 @dataclasses.dataclass
-class ReolinkMotionSensorEntityDescription(BinarySensorEntityChannelDescription):
+class MotionSensorEntityDescription(BinarySensorEntityChannelDescription):
     """Reolink Motion Sensor Entity Description"""
 
     has_entity_name: bool = True
@@ -61,7 +60,16 @@ class ChannelMotionData(ChannelData, Protocol):
     ai_state_task: Task[AiStateResponseState]
 
 
-async def _init_handler(self: BinarySensorEntity, event_handler: Callable[[MotionEventData], None]):
+class DeviceMotionData(DeviceData, Protocol):
+    """Device Motion Data"""
+
+    onvif_motion_handle: TimerHandle
+
+
+async def _init_handler(
+    self: BinarySensorEntity,
+    event_handler: Callable[[MotionEventData | ChannelMotionEventData], None],
+):
     # pylint: disable=protected-access
     if not isinstance(self, ReolinkEntity):
         raise ValueError()
@@ -95,11 +103,13 @@ async def _init_handler(self: BinarySensorEntity, event_handler: Callable[[Motio
     @callback
     def event_listener(event: Event):
         nonlocal coord_cleanup
-        data: MotionEventData
-        if not (data := event.data) or not is_type(data, MotionEventData):
+        if not (data := event.data) or not isinstance(data, dict):
             return
 
-        if is_type(data, MotionEvent) and (method := data.get("method")) is not None:
+        if TYPE_CHECKING:
+            data = cast(MotionEvent, data)
+
+        if (method := data.get("method")) is not None:
             method = UpdateMethods(method)
             if method != UpdateMethods.POLL and coord_cleanup:
                 unsubscribe()
@@ -108,22 +118,18 @@ async def _init_handler(self: BinarySensorEntity, event_handler: Callable[[Motio
             self._attr_extra_state_attributes.update({"update_method": method})
             self.async_schedule_update_ha_state()
 
-        if (
-            is_type(data, MotionEvent)
-            and (channels := data.get("channels")) is not None
-            and isinstance(channels, list)
-        ):
+        if (channels := data.get("channels")) is not None and isinstance(channels, list):
             data = next(
                 filter(
-                    lambda c: c.get("channel_id") == channel_id
-                    if is_type(c, ChannelMotionEventData)
-                    else False,
+                    lambda c: c.get("channel_id") == channel_id if isinstance(c, dict) else False,
                     channels,
                 ),
                 None,
             )
+        elif TYPE_CHECKING:
+            data = cast(MotionEventData, data)
 
-        if not is_type(data, MotionEventData):
+        if not isinstance(data, dict) or ("detected" not in data and "ai" not in data):
             return
 
         event_handler(data)
@@ -152,7 +158,7 @@ async def _ai_init_handler(self: BinarySensorEntity):
         raise ValueError()
 
     description: ReolinkAIMotionSensorEntityDescription = self.entity_description
-    channel_data: ChannelMotionData = self._device_data.channel_info[self._channel_id]
+    channel_data: ChannelMotionData = self._channel_data
     # dispatcher: dispatcher_helper = self.hass.helpers.dispatcher
     # dispatcher_send = hass_bound(dispatcher.dispatcher_send)
     # async_dispatcher_send = hass_bound(dispatcher.async_dispatcher_send)
@@ -207,18 +213,23 @@ async def _ai_init_handler(self: BinarySensorEntity):
 
     ai_key = ai_types_str(description.ai_type)
 
-    def event_handler(data: MotionEventData):
-        if (_ai := data.get("ai")) is not None:
-            if not isinstance(_ai, dict) or (motion := _ai.get(ai_key)) is None:
+    def event_handler(data: MotionEventData | ChannelMotionEventData):
+        if (motion := data.get("detected")) is not None:
+            motion = bool(motion)
+
+        if motion is not False:
+            if (
+                isinstance((_ai := data.get("ai")), dict)
+                and (motion := _ai.get(ai_key)) is not None
+            ):
+                motion = bool(motion)
+            else:
+                motion = None
+            if motion is None or data.get("channel_id") != channel_data.channel_id:
                 self.hass.create_task(fetch_state())
                 return
-        elif (motion := data.get("detected")) is True:
-            self.hass.create_task(fetch_state())
-            return
-        elif motion is None:
-            return
 
-        if update_state(bool(motion)):
+        if update_state(motion):
             self.schedule_update_ha_state()
             # dispatcher_send(signal, self)
 
@@ -230,14 +241,16 @@ async def _motion_init_handler(self: BinarySensorEntity):
     if not isinstance(self, ReolinkEntity):
         raise ValueError()
 
-    description: ReolinkMotionSensorEntityDescription = self.entity_description
-    channel_data: ChannelMotionData = self._device_data.channel_info[self._channel_id]
+    description: MotionSensorEntityDescription = self.entity_description
+    device_data: DeviceMotionData = self._device_data
+    channel_data: ChannelMotionData = self._channel_data
     dispatcher: dispatcher_helper = self.hass.helpers.dispatcher
     dispatcher_send = hass_bound(dispatcher.dispatcher_send)
     async_dispatcher_send = hass_bound(dispatcher.async_dispatcher_send)
     signal = f"{DOMAIN}_{self._entry_id}_{description.key}"
-    multi_channel = len(self._device_data.channel_info) > 0
+    single_channel = self._device_data.device_info.channels == 1
 
+    setdefaultattr(device_data, "onvif_motion_handle", None)
     setdefaultattr(channel_data, "motion_task", None)
 
     def update_state(state: bool):
@@ -259,7 +272,7 @@ async def _motion_init_handler(self: BinarySensorEntity):
     )
 
     async def fetch_state(force=False, sync=True):
-        if multi_channel or force:
+        if not single_channel or force:
             if (task := channel_data.motion_task) is not None:
                 motion = await task
             else:
@@ -281,12 +294,18 @@ async def _motion_init_handler(self: BinarySensorEntity):
                 self.async_schedule_update_ha_state()
                 async_dispatcher_send(signal, self)
 
-    def event_handler(data: MotionEventData):
-        if (motion := data.get("detected")) is None or (motion and multi_channel):
-            self.hass.create_task(fetch_state())
-            return
+    def event_handler(data: MotionEventData | ChannelMotionEventData):
+        if (motion := data.get("detected")) is not None:
+            motion = bool(motion)
 
-        if update_state(bool(motion)):
+        if motion is not False:
+            if motion is None or (
+                not single_channel and data.get("channel_id") != channel_data.channel_id
+            ):
+                self.hass.create_task(fetch_state())
+                return
+
+        if update_state(motion):
             self.schedule_update_ha_state()
             dispatcher_send(signal, self)
 
@@ -305,17 +324,17 @@ async def _motion_init_handler(self: BinarySensorEntity):
         entry_id = self._entry_id
         entry_data = domain_data[entry_id]
         if DATA_ONVIF not in entry_data:
-            service = async_get_onvif(self.hass)
+            service = async_get_onvif(self.hass, False)
             entry_data[DATA_ONVIF] = True
 
             enabled = False
 
-            def onvif_handler(value: OnvifError | bool | MotionEvent | None):
+            def onvif_handler(value: OnvifError | MotionEvent | None):
                 nonlocal enabled
-                if is_type(value, MotionEvent):
+                if isinstance(value, dict):
                     data = value
                 else:
-                    data = {}
+                    data = MotionEvent()
                 if isinstance(value, OnvifError):
                     if not enabled:
                         return
@@ -325,9 +344,18 @@ async def _motion_init_handler(self: BinarySensorEntity):
                     if not enabled:
                         enabled = True
                         data["method"] = UpdateMethods.PUSH_POLL
-                    if value is not None and value is not dict:
-                        data["detected"] = bool(value)
+
                 self.hass.bus.async_fire(entry_data["motion_event"], data)
+                if device_data.onvif_motion_handle:
+                    device_data.onvif_motion_handle.cancel()
+                if data.get("detected") is True:
+                    # ONVIF should fire every second, and can somtimes fail to fire clear
+                    # so we will ensure it
+                    def cleanup():
+                        device_data.onvif_motion_handle = None
+                        self.hass.bus.fire(entry_data["motion_event"], {"detected": False})
+
+                    device_data.onvif_motion_handle = self.hass.loop.call_later(4, cleanup)
 
             self.hass.config_entries.async_get_entry(entry_id).async_on_unload(
                 service.async_subscribe(entry_id, onvif_handler)
@@ -338,7 +366,7 @@ async def _motion_init_handler(self: BinarySensorEntity):
 
 
 _MOTION: Final = BinarySensorChannelEntityConfig.create(
-    ReolinkMotionSensorEntityDescription("motion", name="Motion"),
+    MotionSensorEntityDescription("motion", name="Motion"),
     lambda _self, channel, _data: channel.alarm.motion or channel.supports.motion_detection,
     init_handler=_motion_init_handler,
 )
@@ -353,7 +381,7 @@ class ReolinkAIMotionSensorEntityDescriptionMixin:
 
 @dataclasses.dataclass
 class ReolinkAIMotionSensorEntityDescription(
-    ReolinkMotionSensorEntityDescription, ReolinkAIMotionSensorEntityDescriptionMixin
+    MotionSensorEntityDescription, ReolinkAIMotionSensorEntityDescriptionMixin
 ):
     """Reolink AI Motion Sensor Entity Description"""
 

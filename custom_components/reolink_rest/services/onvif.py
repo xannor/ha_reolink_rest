@@ -10,7 +10,17 @@ from os.path import basename
 from time import time
 from types import MappingProxyType
 from aiohttp.web import Request, Response
-from typing import TYPE_CHECKING, Callable, Final, Mapping, NamedTuple, TypedDict
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Final,
+    Generic,
+    Mapping,
+    NamedTuple,
+    Sequence,
+    TypeVar,
+    TypedDict,
+)
 from typing_extensions import Unpack
 from xml.etree import ElementTree as et
 from aiohttp import ClientSession, TCPConnector, client_exceptions
@@ -51,15 +61,15 @@ class Error(NamedTuple):
 class Subscription(NamedTuple):
     """Push Subscription Token"""
 
-    manager_url: str
+    manager_url: tuple[str, ...]
     timestamp: float
     expires: float | None
 
 
 def _decode_subscription(
-    manager_url: str, timestamp: float, expires: float | None = None, **_kwargs: any
+    manager_url: Sequence[str], timestamp: float, expires: float | None = None, **_kwargs: any
 ):
-    return Subscription(manager_url, timestamp, expires)
+    return Subscription(tuple(manager_url), timestamp, expires)
 
 
 def _encode_subscription(value: Subscription):
@@ -131,6 +141,8 @@ EVENT_SERVICE: Final = "/onvif/event_service"
 
 DEFAULT_EXPIRES: Final = timedelta(hours=1)
 
+_NOTIFICATION_PFX: Final = "/onvif/Notification?Idx=00_"
+
 
 def _get_onvif_base(hostname: str, device_data: DeviceData):
 
@@ -200,7 +212,7 @@ def _process_subscription(
     expires = dt.parse_datetime(expires) if expires else None
     expires = (expires - time).total_seconds() if expires else None
 
-    return Subscription(reference, time.timestamp(), expires)
+    return Subscription((reference,), time.timestamp(), expires)
 
 
 class _WSSE_Args(TypedDict, total=False):
@@ -235,7 +247,9 @@ class _Envelope(ABC):
         return et.tostring(self._create_body(**kwargs))
 
     @abstractmethod
-    def process_response(self, response: et.Element, **kwargs: any) -> Error | Subscription | None:
+    def process_response(
+        self, result: tuple[int, et.Element], **kwargs: any
+    ) -> Error | Subscription | None:
         ...
 
 
@@ -281,8 +295,11 @@ class _Message(_Envelope):
 
 class _SubscriptionMessage(_Message):
     def process_response(
-        self, response: et.Element, /, reference: str | None = None, **kwargs: any
+        self, result: tuple[int, et.Element], /, reference: str | None = None, **kwargs: any
     ):
+        status, response = result
+        if status != 200:
+            return _process_error_response(response)
         return _process_subscription(response, reference)
 
 
@@ -303,10 +320,12 @@ class _Subscribe(_SubscriptionMessage):
         super().__init__(self.ACTION, [], subscribe)
 
     def process_response(
-        self, response: et.Element, /, reference: str | None = None, **kwargs: any
+        self, result: tuple[int, et.Element], /, reference: str | None = None, **kwargs: any
     ):
-        response = response.find(f".//{_NS.WSNT.tag('SubscribeResponse')}")
-        return super().process_response(response, reference, **kwargs)
+        status, response = result
+        if status == 200:
+            result = (status, response.find(f".//{_NS.WSNT.tag('SubscribeResponse')}"))
+        return super().process_response(result, reference, **kwargs)
 
 
 class _Renew(_SubscriptionMessage):
@@ -325,10 +344,12 @@ class _Renew(_SubscriptionMessage):
         super().__init__(self.ACTION, headers, renew)
 
     def process_response(
-        self, response: et.Element, /, reference: str | None = None, **kwargs: any
+        self, result: tuple[int, et.Element], /, reference: str | None = None, **kwargs: any
     ):
-        response = response.find(f".//{_NS.WSNT.tag('RenewResponse')}")
-        return super().process_response(response, reference, **kwargs)
+        status, response = result
+        if status == 200:
+            result = (status, response.find(f".//{_NS.WSNT.tag('RenewResponse')}"))
+        return super().process_response(result, reference, **kwargs)
 
 
 class _UnSubscribe(_Message):
@@ -343,8 +364,25 @@ class _UnSubscribe(_Message):
         headers[1].text = manager
         super().__init__(self.ACTION, headers, unsubscribe)
 
-    def process_response(self, response: et.Element, **kwargs: any):
+    def process_response(self, result: tuple[int, et.Element], **kwargs: any):
         return None
+
+
+_T = TypeVar("_T")
+
+
+class _NoStore(Generic[_T]):
+
+    __slots__ = ("hass",)
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
+    async def async_load(self) -> _T | None:
+        return None
+
+    def async_delay_save(self, data_func: Callable[[], _T], delay: float = 0):
+        return
 
 
 class OnvifService:
@@ -360,10 +398,15 @@ class OnvifService:
         "_pending_renewal_id",
     )
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, track=True) -> None:
         self._hook_subs: dict[EntryId, CALLBACK_TYPE] = {}
         self._listeners: dict[EntryId, list[Callable[[Error | bool | None], None]]] = {}
-        self._store = storage.Store(hass, STORE_VERSION, f"{DOMAIN}_onvif_tokens", True)
+        if track:
+            self._store: storage.Store[dict[EntryId, dict[str, any]]] = storage.Store(
+                hass, STORE_VERSION, f"{DOMAIN}_onvif_tokens", True
+            )
+        else:
+            self._store = _NoStore[dict[EntryId, dict[str, any]]](hass)
         self._subs = None
         self._pending_renewal = None
         self._pending_renewal_id = None
@@ -426,7 +469,7 @@ class OnvifService:
         self._pending_renewal = self._hass.loop.call_later(ttl, run_renewal)
 
     async def _load_subs(self):
-        subs: dict[EntryId, dict[str, any]] = await self._store.async_load()
+        subs = await self._store.async_load()
         self._subs: dict[EntryId, Subscription] = {}
         if subs:
             next_id = None
@@ -514,10 +557,7 @@ class OnvifService:
         if result is None:
             return
 
-        status, response = result
-        if status != 200:
-            return _process_error_response(response)
-        return soap.process_response(response)
+        return soap.process_response(result)
 
     async def _subscribed(self, entry_id: EntryId, sub: Subscription, is_new=True):
         if is_new:
@@ -525,7 +565,7 @@ class OnvifService:
             time_diff = self._get_device_time_offset(entry_id)
             if time_diff is not None:
                 sub = Subscription(
-                    sub.manager_url, sub.timestamp + time_diff.total_seconds(), sub.expires
+                    (sub.manager_url,), sub.timestamp + time_diff.total_seconds(), sub.expires
                 )
             self._subs[entry_id] = sub
             self._save_subs()
@@ -543,21 +583,35 @@ class OnvifService:
             self._schedule_renewal(None, True)
         self._save_subs()
 
-    async def _subscribe(self, entry_id: EntryId):
+    async def _subscribe(self, entry_id: EntryId, count=1):
         if entry_id in (await self._get_subs()):
             _LOGGER.debug("Found existing subscription")
             self._notify(entry_id, None)
             return
         webhooks = async_get_webhook(self._hass)
         url = webhooks.async_get_url(self._hook_subs[entry_id])
-        response = await self._send(entry_id, _Subscribe(url, DEFAULT_EXPIRES))
-        if not response:
-            _LOGGER.warning("Got no response from onvif subscription to %s", entry_id)
-            return await self._unsubscribed(entry_id)
-        if isinstance(response, Error):
-            self._notify(entry_id, response)
-            return await self._unsubscribed(entry_id)
-        return await self._subscribed(entry_id, response)
+        sub = None
+        for _ in range(count):
+            response = await self._send(entry_id, _Subscribe(url, DEFAULT_EXPIRES))
+            if not response:
+                _LOGGER.warning("Got no response from onvif subscription to %s", entry_id)
+                return await self._unsubscribed(entry_id)
+            if isinstance(response, Error):
+                self._notify(entry_id, response)
+                return await self._unsubscribed(entry_id)
+            if sub is None:
+                sub = response
+            else:
+                sub = Subscription(
+                    sub.manager_url + response.manager_url, sub.timestamp, sub.expires
+                )
+        if not sub:
+            return
+        return await self._subscribed(entry_id, sub)
+
+    async def _flush_and_subscribe(self, entry_id: EntryId, count=1):
+        await self.async_flush_subscriptions(entry_id, count)
+        await self._subscribe(entry_id, count)
 
     async def _renew(self, entry_id: EntryId):
         if not (sub := (await self._get_subs()).get(entry_id)):
@@ -570,16 +624,27 @@ class OnvifService:
             return
 
         manager = _get_service_url(api.client.hostname, api.data)
-        manager += sub.manager_url
-        response = await self._send(entry_id, _Renew(manager, DEFAULT_EXPIRES), manager)
-        if not response:
-            _LOGGER.warning("Got no response from onvif subscription to %s", entry_id)
-            await self._send(entry_id, _UnSubscribe(manager))
-            return await self._unsubscribed(entry_id)
-        if isinstance(response, Error):
-            await self._send(entry_id, _UnSubscribe(manager))
-            return await self._subscribe(entry_id)
-        return await self._subscribed(entry_id, response)
+        renewal = None
+        for reference in sub.manager_url:
+            response = await self._send(
+                entry_id, _Renew(manager + reference, DEFAULT_EXPIRES), manager
+            )
+            if not response:
+                _LOGGER.warning("Got no response from onvif subscription to %s", entry_id)
+                await self._send(entry_id, _UnSubscribe(manager))
+                return await self._unsubscribed(entry_id)
+            if isinstance(response, Error):
+                await self._send(entry_id, _UnSubscribe(manager))
+                return await self._subscribe(entry_id)
+            if renewal is None:
+                renewal = response
+            else:
+                renewal = Subscription(
+                    renewal.manager_url + response.manager_url, renewal.timestamp, renewal.expires
+                )
+        if not renewal:
+            return
+        return await self._subscribed(entry_id, renewal)
 
     async def _unsubscribe(self, entry_id: EntryId):
         sub = (await self._get_subs()).pop(entry_id, None)
@@ -587,9 +652,21 @@ class OnvifService:
             return
         if api := self._get_api(entry_id):
             manager = _get_service_url(api.client.hostname, api.data)
-            manager += sub.manager_url
-            await self._send(entry_id, _UnSubscribe(manager))
+            for reference in sub.manager_url:
+                await self._send(entry_id, _UnSubscribe(manager + reference))
         return await self._unsubscribed(entry_id)
+
+    async def async_flush_subscriptions(self, entry_id: EntryId, count=3):
+        sub = (await self._get_subs()).pop(entry_id, None)
+        if api := self._get_api(entry_id):
+            manager = _get_service_url(api.client.hostname, api.data)
+            for i in range(count):
+                notification = _NOTIFICATION_PFX + str(i)
+                if sub and sub.manager_url == notification:
+                    sub = None
+                await self._send(entry_id, _UnSubscribe(manager + notification))
+            if sub:
+                await self._send(entry_id, manager + sub.manager_url)
 
     def _ensure_hook(self, entry_id: EntryId):
         if entry_id not in self._hook_subs:
@@ -614,11 +691,14 @@ class OnvifService:
 
     @callback
     def async_subscribe(
-        self, entry_id: EntryId, handler: Callable[[Error | bool | None], None]
+        self, entry_id: EntryId, handler: Callable[[Error | MotionEvent | None], None]
     ) -> CALLBACK_TYPE:
         if entry_id not in self._hook_subs:
             self._ensure_hook(entry_id)
-            self._hass.create_task(self._subscribe(entry_id))
+            if isinstance(self._store, _NoStore):
+                self._hass.create_task(self._flush_and_subscribe(entry_id))
+            else:
+                self._hass.create_task(self._subscribe(entry_id))
 
         listeners = self._listeners.setdefault(entry_id, [])
         listeners.append(handler)
@@ -634,7 +714,7 @@ class OnvifService:
 
         return unsubscribe
 
-    def _notify(self, entry_id: EntryId, value: Error | bool | None):
+    def _notify(self, entry_id: EntryId, value: Error | MotionEvent | None):
         if listeners := self._listeners.get(entry_id):
             for listener in listeners:
                 try:
@@ -656,24 +736,26 @@ class OnvifService:
 
         for message in root.iter(_NS.WSNT.tag("NotificationMessage")):
             if (
-                not (
-                    topic := message.find(
-                        _NS.WSNT.tag(
-                            "Topic[@Dialect='http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet']"
-                        )
+                topic := message.find(
+                    _NS.WSNT.tag(
+                        "Topic[@Dialect='http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet']"
                     )
                 )
-                or not topic.text
-            ):
+            ) is None or not topic.text:
                 continue
             if not (rule := basename(topic.text)):
                 continue
 
             channel = None
-            if (source := message.find(".//" + _NS.TT.tag("SimpleItem[@Name='Source']"))) or (
-                source := message.find(
-                    ".//" + _NS.TT.tag("SimpleItem[@Name='VideoSourceConfigurationToken']")
+            if (
+                (source := message.find(".//" + _NS.TT.tag("SimpleItem[@Name='Source']")))
+                is not None
+                or (
+                    source := message.find(
+                        ".//" + _NS.TT.tag("SimpleItem[@Name='VideoSourceConfigurationToken']")
+                    )
                 )
+                is not None
                 and "Value" in source.attrib
             ):
                 try:
@@ -683,9 +765,8 @@ class OnvifService:
 
             key = "IsMotion" if rule == "Motion" else "State"
             if (
-                not (data := message.find(".//" + _NS.TT.tag(f"SimpleItem[@Name='{key}']")))
-                or "Value" not in data.attrib
-            ):
+                data := message.find(".//" + _NS.TT.tag(f"SimpleItem[@Name='{key}']"))
+            ) is None or "Value" not in data.attrib:
                 continue
             if channel is not None:
                 channels = event.setdefault("channels", [])
@@ -731,6 +812,6 @@ class OnvifService:
 
 @callback
 @bind_hass
-def async_get(hass: HomeAssistant) -> OnvifService:
+def async_get(hass: HomeAssistant, tracking=True) -> OnvifService:
     domain_data: dict[str, any] = hass.data.setdefault(DOMAIN, {})
-    return domain_data.setdefault(DATA_ONVIF, OnvifService(hass))
+    return domain_data.setdefault(DATA_ONVIF, OnvifService(hass, tracking))

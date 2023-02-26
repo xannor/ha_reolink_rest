@@ -24,3 +24,6 @@ class MotionEvent(MotionEventData, total=False):
 
     method: UpdateMethods
     channels: list[ChannelMotionEventData]
+
+
+MotionEventType = MotionEventData | ChannelMotionEventData | MotionEvent

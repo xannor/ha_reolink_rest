@@ -75,7 +75,7 @@ class SensorEntityConfig(SensorEntityConfigMixin, DeviceEntityConfig[_DT]):
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class SensorChannelEntityConfig(SensorEntityConfigMixin, ChannelEntityConfig[_DT]):
+class SensorEntityChannelConfig(SensorEntityConfigMixin, ChannelEntityConfig[_DT]):
     """Sensor Channel Entity Configuration"""
 
     @classmethod
@@ -84,7 +84,7 @@ class SensorChannelEntityConfig(SensorEntityConfigMixin, ChannelEntityConfig[_DT
         description: _DT,
         channel_supported: ChannelSupportedCallback[_DT],
         /,
-        device_supported: DeviceSupportedCallback[_DT],
+        device_supported: DeviceSupportedCallback[_DT] = None,
         data_handler: EntityDataHandlerCallback[SensorEntity] = None,
         init_handler: AsyncEntityInitializedCallback[SensorEntity] = None,
         **kwargs: any,

@@ -1,14 +1,19 @@
 """Reolink Entities"""
 
 import dataclasses
+from time import time
+from typing import Callable
+from typing_extensions import TypeVar
 from homeassistant.config_entries import current_entry
 from homeassistant.helpers.entity import Entity, EntityDescription
 
 from homeassistant.backports.enum import StrEnum
 
+from .const import DATA_HISPEED_COORDINDATOR, DOMAIN
+
 from ._utilities.object import setdefaultattr
 
-from .typing import ChannelData, EntryId
+from .typing import ChannelData, DomainDataType, EntryId
 
 from .api import (
     ReolinkDeviceApi,
@@ -717,6 +722,10 @@ class ReolinkEntity(Entity):
         return getattr(self, "_attr_channel_id", 0)
 
     @property
+    def _channel_data(self):
+        return self._device_data.channel_info[self._channel_id]
+
+    @property
     def _update_method(self) -> UpdateMethods:
         return getattr(self, "_attr_update_method", UpdateMethods.POLL)
 
@@ -726,3 +735,48 @@ class ReolinkEntity(Entity):
             raise ValueError("value must be provided")
         self._attr_update_method = UpdateMethods(value)
         self._attr_extra_state_attributes["update_method"] = self._attr_update_method
+
+    def _temp_attach_hispeed_coordinator(
+        self,
+        release: Callable[[Entity], bool],
+        give_up_after: float = 0,
+    ):
+        cleanup = None
+        timestamp: float = 0
+
+        def should_detach():
+            nonlocal cleanup
+            if not cleanup:
+                return
+            if release(self) or (give_up_after > 0 and time() > timestamp + give_up_after):
+                _cleanup = cleanup
+                cleanup = None
+                _cleanup()
+
+        def should_attach(always=True):
+            nonlocal cleanup, timestamp
+
+            if cleanup:
+                if release(self):
+                    _cleanup = cleanup
+                    cleanup = None
+                    _cleanup()
+                return
+
+            if not always and release(self):
+                return
+
+            if give_up_after > 0:
+                timestamp = time() + give_up_after
+
+            domain_data: DomainDataType = self.hass.data[DOMAIN]
+            entry_data = domain_data[self._entry_id]
+            coordinator = entry_data[DATA_HISPEED_COORDINDATOR]
+
+            async def register():
+                nonlocal cleanup
+                cleanup = coordinator.async_add_listener(should_detach, self.coordinator_context)
+
+            self.hass.create_task(register())
+
+        return should_attach

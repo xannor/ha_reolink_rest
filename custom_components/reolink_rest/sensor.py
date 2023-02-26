@@ -1,6 +1,7 @@
 """Reolink Sensor Platform"""
 
 import logging
+from typing import TYPE_CHECKING, cast
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -24,7 +25,7 @@ from .api import ReolinkDeviceApi
 
 from .entity import ChannelDescriptionMixin, ReolinkEntity
 
-from .sensor_typing import SensorEntityDescription
+from .sensor_typing import SensorEntityDescription, SensorEntityConfig
 
 from ._utilities.typing import bind
 
@@ -100,6 +101,9 @@ async def async_setup_entry(
                     continue
                 if isinstance(description, ChannelDescriptionMixin):
                     description = description.from_channel(info)
+
+            if TYPE_CHECKING:
+                init = cast(SensorEntityConfig, init)
 
             entities.append(
                 ReolinkSensorEntity(

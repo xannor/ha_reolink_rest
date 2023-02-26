@@ -49,50 +49,6 @@ def _set_brightness_value(self: LightEntity, info: led_typing.WhiteLedInfo):
     self._attr_brightness = min(info.brightness, brightness_range.min) / brightness_range.max
 
 
-def _create_attach_handler(self: LightEntity):
-    # pylint: disable=protected-access
-    if not isinstance(self, ReolinkEntity):
-        raise ValueError()
-
-    rself = self
-
-    cleanup = None
-    want_state = None
-    bail_after: float = 0
-
-    def should_detach():
-        nonlocal cleanup
-        if not cleanup:
-            return
-        if self.is_on == want_state or time() > bail_after:
-            _cleanup = cleanup
-            cleanup = None
-            _cleanup()
-
-    def state_handler(state: bool):
-        nonlocal cleanup, want_state, bail_after
-
-        if cleanup:
-            if want_state != state:
-                want_state = state
-            return
-        if self.is_on == state:
-            return
-        want_state = state
-        bail_after = time() + 2
-        domain_data: DomainDataType = self.hass.data[DOMAIN]
-        entry_data = domain_data[rself._entry_id]
-        coordinator = entry_data[DATA_HISPEED_COORDINDATOR]
-
-        async def register():
-            nonlocal cleanup
-            cleanup = coordinator.async_add_listener(should_detach, rself.coordinator_context)
-
-        self.hass.create_task(register())
-
-    return state_handler
-
-
 async def _floodlight_init(self: LightEntity):
     # pylint: disable=protected-access
     if not isinstance(self, ReolinkEntity):
@@ -127,10 +83,21 @@ async def _floodlight_init(self: LightEntity):
 
     channel = self._device_data.capabilities.channels[self._channel_id]
     if channel.alarm.motion or channel.supports.motion_detection:
-        attach = _create_attach_handler(self)
+
+        def has_motion(self: LightEntity):
+            return bool(self.is_on)
+
+        def has_no_motion(self: LightEntity):
+            return not bool(self.is_on)
+
+        attach_motion = self._temp_attach_hispeed_coordinator(has_motion, 2)
+        attach_no_motion = self._temp_attach_hispeed_coordinator(has_no_motion, 2)
 
         def on_motion(sensor: BinarySensorEntity):
-            attach(sensor.is_on)
+            if sensor.is_on:
+                attach_motion()
+            else:
+                attach_no_motion()
 
         signal = f"{DOMAIN}_{self._entry_id}_ch_{self._channel_id}_motion"
 
@@ -141,10 +108,13 @@ async def _floodlight_init(self: LightEntity):
 def _floodlight_state(state: bool):
     # pylint: disable=protected-access
 
+    def should_release(self: LightEntity):
+        return self.is_on == state
+
     async def call(self: ReolinkEntity, **_kwargs: any):
         info: led_typing.WhiteLedInfo = SimpleNamespace(state=state)
         await self._client.set_white_led(info, self._channel_id)
-        _create_attach_handler(self)(state)
+        self._temp_attach_hispeed_coordinator(should_release, 2)()
         # even the the command suceeds, there is a delay before it actually happens so we will
         # wait for confirmation
         while self.is_on != state:

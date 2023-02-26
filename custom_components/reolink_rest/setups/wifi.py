@@ -87,7 +87,7 @@ async def _signal_init(self: SensorEntity):
 
 _SENSOR: Final = SensorEntityConfig.create(
     SensorEntityDescription(
-        key="wifi_ssid",
+        "wifi_ssid",
         name="Wi-Fi SSID",
         icon="mdi:wifi",
         entity_category=EntityCategory.DIAGNOSTIC,

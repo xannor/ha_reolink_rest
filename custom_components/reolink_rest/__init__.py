@@ -68,11 +68,10 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: Final = (
     Platform.CAMERA,
     Platform.BINARY_SENSOR,
-    # Platform.NUMBER,
+    Platform.NUMBER,
     Platform.SENSOR,
     # Platform.SWITCH,
     Platform.LIGHT,
-    # Platform.BUTTON,
     # Platform.SIREN,
 )
 
@@ -485,7 +484,6 @@ async def _execute_commands(
         api,
         config_entry.entry_id,
         api.async_ensure_connection,
-        hass,
         **config_entry.options | config_entry.data,
     )
 

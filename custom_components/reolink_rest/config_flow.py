@@ -10,13 +10,13 @@ import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.typing import DiscoveryInfoType
 from homeassistant.data_entry_flow import AbortFlow
 
-from homeassistant.config_entries import DISCOVERY_SOURCES
 
 if TYPE_CHECKING:
     from homeassistant.helpers import device_registry as helper_device_registry
@@ -163,7 +163,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle the intial step."""
         if user_input is None and self.init_data is None:
             return await self.async_step_connection()
-        if self.source in DISCOVERY_SOURCES and self.cur_step is None:
+        if self.source in config_entries.DISCOVERY_SOURCES and self.cur_step is None:
             return self.async_show_progress_done(next_step_id="user")
         if user_input:
             if not self.data:
@@ -177,54 +177,63 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         api = ReolinkDeviceApi()
         try:
-            await api.async_ensure_connection(self.hass, **data)
+            options = self.options or {}
+            await api.async_ensure_connection(**data | options)
             client = api.client
+        except reo_errors.ReolinkConnectionError:
+            errors = {"base": "cannot_connect"}
+            return await self.async_step_connection(data, errors)
+        except reo_errors.ReolinkTimeoutError:
+            errors = {"base": "timeout"}
+            return await self.async_step_connection(data, errors)
+        except ConfigEntryNotReady:
+            errors = {"base": "cannot_connect"}
+            return await self.async_step_connection(data, errors)
+        except ConfigEntryAuthFailed:
+            errors = (
+                {"base": "invalid_auth"}
+                if data.get(CONF_USERNAME, DEFAULT_USERNAME) != DEFAULT_USERNAME
+                or data.get(CONF_PASSWORD, DEFAULT_PASSWORD) != DEFAULT_PASSWORD
+                else {"base": "auth_required"}
+            )
+            return await self.async_step_auth(data, errors)
+        except aiohttp.ClientResponseError as http_error:
+            if http_error.status in (301, 302, 308) and "location" in http_error.headers:
+                location = http_error.headers["location"]
+                client = api.client
+                if not client.secured and location.startswith("https://"):
+                    self.data[CONF_USE_HTTPS] = True
+                    return await self.async_step_user()
+                elif client.secured and location.startswith("http://"):
+                    del self.data[CONF_USE_HTTPS]
+                    return await self.async_step_user()
+
+            return self.async_abort(reason="response_error")
+        except ssl.SSLError as ssl_error:
+            if (
+                ssl_error.errno
+                == 1
+                # and ssl_error.reason == "SSLV3_ALERT_HANDSHAKE_FAILURE"
+            ):
+                _LOGGER.warning(
+                    "Device %s certificate only supports a weak (deprecated) key, enabling INSECURE SSL support for this device. If SSL is not necessary, please consider disabling SSL on device, or manually installing a strong certificate.",
+                    data[CONF_HOST],
+                )
+                if self.options is None:
+                    self.options = {}
+                self.options[OPT_SSL] = SSLMode.INSECURE
+                return await self.async_step_user()
+            _LOGGER.exception("SSL error occurred")
+            return await self.async_step_connection(data, {"base": "unknown"})
         except Exception:
             _LOGGER.exception("Unhandled exception occurred")
             return await self.async_step_connection(data, {"base": "unknown"})
 
         title: str = self.context.get("title_placeholders", {}).get("name", "Camera")
 
-        encryption = Encryption.HTTPS if data.get(CONF_USE_HTTPS, False) else Encryption.NONE
+        # check to see if login redirected us and update the base_url
+
         try:
-            await client.connect(
-                data[CONF_HOST],
-                data.get(CONF_PORT, None),
-                encryption=encryption,
-            )
-        except Exception:  # pylint: disable=broad-except
-            _LOGGER.exception("Unhandled exception occurred")
-            return await self.async_step_connection(data, {"base": "unknown"})
-
-        connection_id = client.connection_id
-        try:
-            if not await client.login(
-                data.get(CONF_USERNAME, DEFAULT_USERNAME),
-                data.get(CONF_PASSWORD, DEFAULT_PASSWORD),
-            ):
-                if (
-                    data.get(CONF_USERNAME, DEFAULT_USERNAME) == DEFAULT_USERNAME
-                    and data.get(CONF_PASSWORD, DEFAULT_PASSWORD) == DEFAULT_PASSWORD
-                ):
-                    data.pop(CONF_USERNAME, None)
-                    data.pop(CONF_PASSWORD, None)
-                errors = None
-                if CONF_USERNAME in data:
-                    errors = {"base": "invalid_auth"}
-                return await self.async_step_auth(data, errors)
-
-            # check to see if login redirected us and update the base_url
-            if client.connection_id != connection_id:
-                connection_id = client.connection_id
-                _user_data: UserDataType = {CONF_HOST: client.base_url}
-                if _validate_connection_data(_user_data):
-                    _user_data = dict(slice_keys(_user_data, CONF_HOST, CONF_PORT, CONF_USE_HTTPS))
-                    data.update(_user_data)
-                    _LOGGER.warning(
-                        "Corrected camera(%s) port during setup, you can safely ignore previous warnings about redirecting.",
-                        data[CONF_HOST],
-                    )
-
             capabilities = await client.get_capabilities(data.get(CONF_USERNAME, DEFAULT_USERNAME))
 
             if capabilities.device.info:
@@ -250,53 +259,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         self.context["channels"] = _simple_channels(channels)
                         if self.options is None or OPT_CHANNELS not in self.options:
                             return await self.async_step_channels(self.options, {})
-        except reo_errors.ReolinkConnectionError:
-            errors = {"base": "cannot_connect"}
-            return await self.async_step_connection(data, errors)
         except reo_errors.ReolinkTimeoutError:
             errors = {"base": "timeout"}
             return await self.async_step_connection(data, errors)
         except reo_errors.ReolinkResponseError as resp_error:
-            if resp_error.code in AUTH_ERRORCODES:
-                errors = (
-                    {"base": "invalid_auth"}
-                    if data.get(CONF_USERNAME, DEFAULT_USERNAME) != DEFAULT_USERNAME
-                    or data.get(CONF_PASSWORD, DEFAULT_PASSWORD) != DEFAULT_PASSWORD
-                    else {"base": "auth_required"}
-                )
-                return await self.async_step_auth(data, errors)
             _LOGGER.exception(
                 "An internal device error occurred on %s, configuration aborting",
                 data[CONF_HOST],
             )
             return self.async_abort(reason="device_error")
-        except aiohttp.ClientResponseError as http_error:
-            if http_error.status in (301, 302, 308) and "location" in http_error.headers:
-                location = http_error.headers["location"]
-                if not client.secured and location.startswith("https://"):
-                    self.data[CONF_USE_HTTPS] = True
-                    return await self.async_step_user()
-                elif client.secured and location.startswith("http://"):
-                    del self.data[CONF_USE_HTTPS]
-                    return await self.async_step_user()
-
-            return self.async_abort(reason="response_error")
-        except ssl.SSLError as ssl_error:
-            if (
-                ssl_error.errno
-                == 1
-                # and ssl_error.reason == "SSLV3_ALERT_HANDSHAKE_FAILURE"
-            ):
-                _LOGGER.warning(
-                    "Device %s certificate only supports a weak (deprecated) key, enabling INSECURE SSL support for this device. If SSL is not necessary, please consider disabling SSL on device, or manually installing a strong certificate.",
-                    data[CONF_HOST],
-                )
-                if self.options is None:
-                    self.options = {}
-                self.options[OPT_SSL] = SSLMode.INSECURE
-                return await self.async_step_user(user_input)
-            _LOGGER.exception("SSL error occurred")
-            return await self.async_step_connection(data, {"base": "unknown"})
         except Exception:  # pylint: disable=broad-except
             # we want to "cleanly" fail as possible
             _LOGGER.exception("Unhandled exception occurred")

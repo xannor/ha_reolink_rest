@@ -7,12 +7,12 @@ homeassistant:
 logger:
   default: warning
   logs:
-    #async_reolink.rest: debug
-    #async_reolink.api: debug
-    custom_components.reolink_discovery: debug
+    # async_reolink.rest: debug
+    # async_reolink.api: debug
+    # custom_components.reolink_discovery: debug
     custom_components.reolink_rest: debug
-    custom_components.reolink_rest.services.webhook: debug
-    custom_components.reolink_rest.services.onvif: debug
+    # custom_components.reolink_rest.services.webhook: debug
+    # custom_components.reolink_rest.services.onvif: debug
 
 
 # If you need to debug uncomment the line below (doc: https://www.home-assistant.io/integrations/debugpy/)
