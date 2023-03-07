@@ -1,3 +1,5 @@
+*** this integration is on hiatus, I reccommend using the built in integration going forward ***
+
 A Home Assistant custom integration for Reolink IP Devices (what support web)
 
 This will add support for ReoLink cameras (and some devices) and works well with my other addon [Reolink Discovery](https://github.com/xannor/ha_reolink_discovery)
