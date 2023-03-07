@@ -1,4 +1,6 @@
-Reolink IP Devices for Home Assistant
+*** This integration is on hiatus, I would reccomend using the built in ReoLink integration going forward. ***
+
+Reolink IP Devices for Home Assistant (on hiatus)
 
 This integration provides support for REOLink Cameras and devices that support the REST style API.
 
